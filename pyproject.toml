@@ -1,0 +1,42 @@
+[project]
+name = "meshcore-bot"
+version = "0.1.0"
+description = "Reply to direct MeshCore messages with hop-by-hop path stats"
+authors = [
+    { name = "Tobias Hoffmann", email = "garbaz.github@pm.me" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "meshcore",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+meshcore-bot = "meshcore_bot.bot:run"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+meshcore = { git = "https://github.com/meshcore-dev/meshcore_py" }
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "ruff>=0.16.4",
+]
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "meshcore.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "bleak.*"
+ignore_missing_imports = true
