@@ -12,6 +12,9 @@ dependencies = [
     "pyserial>=3.5",
 ]
 
+[project.optional-dependencies]
+ble = ["bleak>=0.22.0"]
+
 [project.scripts]
 meshcore-bot = "meshcore_bot.bot:run"
 
@@ -25,6 +28,7 @@ meshcore = { git = "https://github.com/meshcore-dev/meshcore_py" }
 [dependency-groups]
 dev = [
     "mypy>=2.3.1",
+    "pyright>=1.1.400",
     "ruff>=0.16.4",
 ]
 

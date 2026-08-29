@@ -19,10 +19,7 @@ _GREETINGS = {
 
 @command(["frog", "f"], secret=True)
 async def _(ctx: Context, args: list[str]) -> None:
-    """Send a frog emoji.
-
-    Usage: frog
-    """
+    """Send a frog emoji."""
     await ctx.reply("\U0001f438")
 
 
@@ -41,9 +38,6 @@ async def _(ctx: Context, args: list[str]) -> None:
     ]
 )
 async def _(ctx: Context, args: list[str]) -> None:
-    """Greetings.
-
-    Usage: hi
-    """
+    """Greetings."""
     greeting = _GREETINGS.get(ctx.verb.lower(), "hi")
     await ctx.reply(f"\U0001f44b {greeting}")

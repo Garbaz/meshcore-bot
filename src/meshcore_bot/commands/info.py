@@ -29,10 +29,7 @@ def _compress_route(lines: list[str], max_bytes: int) -> str:
 
 @command(["ping", "p", "beep", "test"], require_mention=False)
 async def _(ctx: Context, args: list[str]) -> None:
-    """Test connectivity.
-
-    Usage: ping
-    """
+    """Test connectivity."""
     path_len: Any = ctx.msg.get("path_len")
     hops = (
         f"{path_len} hop(s)"
@@ -50,10 +47,7 @@ async def _(ctx: Context, args: list[str]) -> None:
 
 @command(["path", "r", "route", "trace"])
 async def _(ctx: Context, args: list[str]) -> None:
-    """Show the hop-by-hop path of the current message.
-
-    Usage: path
-    """
+    """Show the hop-by-hop path of the current message."""
     from meshcore_bot.registry import resolve_path
 
     msg = ctx.msg

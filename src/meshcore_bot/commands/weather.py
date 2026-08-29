@@ -215,12 +215,9 @@ async def _fetch_weather(
     return current, rain_info
 
 
-@command(["weather", "w"])
+@command(["weather", "w"], usage="[place]")
 async def _(ctx: Context, args: list[str]) -> None:
-    """Show current weather.
-
-    Usage: weather [place]
-    """
+    """Show current weather."""
     if args:
         place = " ".join(args)
         coords = await _geocode(place)

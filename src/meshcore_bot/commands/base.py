@@ -135,6 +135,7 @@ class Command:
     require_mention: bool
     min_args: int
     secret: bool
+    usage: str = ""
 
     @property
     def name(self) -> str:
@@ -150,17 +151,19 @@ def command(
     min_args: int = 0,
     secret: bool = False,
     require_mention: bool = True,
+    usage: str = "",
 ) -> Callable[[CommandFunc], CommandFunc]:
     """Register *func* as a bot command.
 
     *aliases* is the canonical name (first entry) plus any aliases. A bare
-    string is treated as a single-element list. Secret commands are not shown
-    in help.
+    string is treated as a single-element list. *usage* is the argument hint
+    appended to the name in help output (e.g. ``"[place]"``). Secret commands
+    are not shown in help.
     """
     alias_list = [aliases] if isinstance(aliases, str) else list(aliases)
 
     def decorator(func: CommandFunc) -> CommandFunc:
-        cmd = Command(alias_list, func, require_mention, min_args, secret)
+        cmd = Command(alias_list, func, require_mention, min_args, secret, usage)
         for a in alias_list:
             _commands[a.lower()] = cmd
         return func
@@ -187,21 +190,13 @@ def list_commands() -> list[Command]:
 
 
 def usage_line(cmd: Command) -> str:
-    """Extract the 'Usage:' line from the docstring, or fall back to name only."""
-    doc = (cmd.func.__doc__ or "").strip()
-    for line in doc.splitlines():
-        line = line.strip()
-        if line.lower().startswith("usage:"):
-            return line.removeprefix("Usage:").removeprefix("usage:").strip()
-    return cmd.name
+    """Build the usage string from the command name and argument hint."""
+    return f"{cmd.name} {cmd.usage}".strip()
 
 
 def _doc_body(cmd: Command) -> str:
-    """The docstring with the Usage: line removed, stripped."""
-    doc = (cmd.func.__doc__ or "(no help available)").strip()
-    lines = doc.splitlines()
-    body = [ln for ln in lines if not ln.strip().lower().startswith("usage:")]
-    return "\n".join(body).strip() or "(no help available)"
+    """The docstring, stripped."""
+    return (cmd.func.__doc__ or "(no help available)").strip() or "(no help available)"
 
 
 def full_help() -> str:

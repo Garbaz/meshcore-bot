@@ -1,10 +1,9 @@
 """Command registry and implementations for the meshcore bot.
 
-Commands are registered with the ``@command`` decorator. The function name
-(less a ``cmd_`` prefix) becomes the canonical command name. Optional
-``aliases`` are not shown in the general help listing but are listed when
-viewing ``?<command>`` for a specific command. ``?`` with no argument shows
-the full help.
+Commands are registered with the ``@command`` decorator. The first entry in
+*aliases* is the canonical name; the rest are hidden aliases. The optional
+*usage* string gives the argument hint shown in help. ``?`` with no argument
+shows the full help; ``?<name>`` shows details for a specific command.
 """
 
 from __future__ import annotations

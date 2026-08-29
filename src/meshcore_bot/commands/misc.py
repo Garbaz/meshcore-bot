@@ -7,12 +7,9 @@ from urllib.parse import quote
 from meshcore_bot.commands.base import Context, command, command_help, full_help
 
 
-@command(["help", "h", "?"])
+@command(["help", "h", "?"], usage="[command]")
 async def _(ctx: Context, args: list[str]) -> None:
-    """Show help.
-
-    Usage: help [command]
-    """
+    """Show help."""
     if args:
         h = command_help(args[0])
         if h is None:
@@ -25,10 +22,7 @@ async def _(ctx: Context, args: list[str]) -> None:
 
 @command(["add", "a", "key"])
 async def _(ctx: Context, args: list[str]) -> None:
-    """Show this bot's share link for adding it as a contact.
-
-    Usage: add
-    """
+    """Show this bot's share link for adding it as a contact."""
     name = str(ctx.mc.self_info.get("name", ""))
     pubkey = str(ctx.mc.self_info.get("public_key", ""))
     if not pubkey:
