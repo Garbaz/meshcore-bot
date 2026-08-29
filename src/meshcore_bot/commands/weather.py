@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meshcore_bot.commands.base import LOCATION, Context, command, origin
+from meshcore_bot.commands.base import Context, command, origin
 
 _COMPASS = [
     "N",
@@ -232,10 +232,10 @@ async def _(ctx: Context, args: list[str]) -> None:
         coords = _path_location(ctx)
         if coords is not None:
             lat, lon, _ = coords
-            name = await _reverse_geocode(lat, lon) or LOCATION or "here"
+            name = await _reverse_geocode(lat, lon) or ctx.location or "here"
         else:
             lat, lon = 0.0, 0.0
-            name = LOCATION or "here"
+            name = ctx.location or "here"
 
     result = await _fetch_weather(lat, lon)
     if result is None:

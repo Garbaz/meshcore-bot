@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meshcore_bot.commands.base import LOCATION, Context, command, origin
+from meshcore_bot.commands.base import Context, command, origin
 
 
 def _compress_route(lines: list[str], max_bytes: int) -> str:
@@ -42,8 +42,8 @@ async def _(ctx: Context, args: list[str]) -> None:
     word = "Boop" if ctx.verb.lower() == "beep" else "Pong"
     if ctx.verb.lower() == "test":
         word = "Ack"
-    if LOCATION:
-        await ctx.reply(f"{word} from {LOCATION}: {hops}")
+    if ctx.location:
+        await ctx.reply(f"{word} from {ctx.location}: {hops}")
     else:
         await ctx.reply(f"{word}: {hops}")
 
@@ -59,7 +59,7 @@ async def _(ctx: Context, args: list[str]) -> None:
     msg = ctx.msg
     path_len: Any = msg.get("path_len")
 
-    loc = LOCATION if LOCATION else ""
+    loc = ctx.location or ""
 
     path_hex = str(msg.get("path") or "")
 

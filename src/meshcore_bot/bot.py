@@ -25,15 +25,27 @@ from meshcore_bot.commands import (
     parse_command,
     usage_line,
 )
-from meshcore_bot.registry import REGISTRY_TTL, NodeRegistry
+from meshcore_bot.registry import NodeRegistry
 
 log = logging.getLogger("meshcore_bot")
 
-CACHE_PATH = Path("~/.cache/meshcore-bot/registry.json").expanduser()
 
-# Channel names to listen on (configured at startup from CHANNEL_NAMES).
-# Each entry is the channel *name* as stored on the companion (e.g. "#ping").
-CHANNEL_NAMES = ["#ping", "#bot", "#test"]
+def _parse_channels(raw: list[str]) -> list[str]:
+    """Normalise --channels args into a list of ``#name`` strings.
+
+    Accepts comma-separated values and repeated flags. The leading ``#`` is
+    added if missing.
+    """
+    out: list[str] = []
+    for item in raw:
+        for part in item.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not part.startswith("#"):
+                part = "#" + part
+            out.append(part)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -45,20 +57,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="meshcore-bot",
         description="Reply to MeshCore DMs and channel mentions with path stats.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         add_help=False,
     )
     g = p.add_argument_group("connection")
     g.add_argument("-t", "--tcp", metavar="HOST", help="connect via TCP/IP to HOST")
-    g.add_argument(
-        "-p", "--port", type=int, default=5000, help="TCP port (default 5000)"
-    )
+    g.add_argument("-p", "--port", type=int, default=5000, help="TCP port")
     g.add_argument("-s", "--serial", metavar="PORT", help="connect via serial/USB port")
     g.add_argument(
         "-b",
         "--baudrate",
         type=int,
         default=115200,
-        help="serial baudrate (default 115200)",
+        help="serial baudrate",
     )
     g.add_argument("-a", "--address", metavar="ADDR", help="BLE device address or name")
     g.add_argument(
@@ -72,13 +83,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan-timeout",
         type=float,
         default=2.0,
-        help="BLE scan timeout in seconds (default 2)",
+        help="BLE scan timeout in seconds",
     )
 
     g2 = p.add_argument_group("logging")
     g2.add_argument("-D", "--debug", action="store_true", help="enable debug logging")
     g2.add_argument("-q", "--quiet", action="store_true", help="only show errors")
     g2.add_argument("-h", "--help", action="help", help="show this help and exit")
+
+    g3 = p.add_argument_group("bot")
+    g3.add_argument(
+        "--location",
+        default=None,
+        help="bot location shown in ping/path/weather fallback",
+    )
+    g3.add_argument(
+        "--channels",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="channel names to listen on, comma-separated, e.g. ping,bot,test",
+    )
+    g3.add_argument(
+        "--cache-path",
+        default=str(Path("~/.cache/meshcore-bot/registry.json").expanduser()),
+        help="registry cache path",
+    )
+    g3.add_argument(
+        "--registry-ttl",
+        type=float,
+        default=24.0,
+        metavar="HOURS",
+        help="registry refresh interval in hours",
+    )
     return p
 
 
@@ -246,6 +283,7 @@ async def handle_dm(
     registry: NodeRegistry,
     bot_name: str,
     region_scope: str,
+    location: str | None,
     event: Event,
 ) -> None:
     msg: dict[str, Any] = event.payload or {}
@@ -274,6 +312,7 @@ async def handle_dm(
         is_dm=True,
         contact=contact,
         msg=msg,
+        location=location,
     )
     await dispatch(ctx, text, mentioned=True)
 
@@ -283,6 +322,7 @@ async def handle_channel(
     registry: NodeRegistry,
     bot_name: str,
     region_scope: str,
+    location: str | None,
     chan_indices: set[int],
     event: Event,
 ) -> None:
@@ -314,6 +354,7 @@ async def handle_channel(
         is_dm=False,
         channel_idx=chan,
         msg=msg,
+        location=location,
     )
     await dispatch(ctx, command_text, mentioned=is_mentioned)
 
@@ -376,9 +417,9 @@ async def main(args: argparse.Namespace) -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    registry = NodeRegistry(CACHE_PATH)
+    registry = NodeRegistry(Path(args.cache_path))
     log.info("loading node registry (may take a while on first run)...")
-    await registry.load(ttl=REGISTRY_TTL)
+    await registry.load(ttl=int(args.registry_ttl * 3600))
     log.info("registry ready: %d relay nodes", len(registry.nodes))
 
     mc = await connect(args)
@@ -396,14 +437,17 @@ async def main(args: argparse.Namespace) -> None:
     log.info("fetched %d contacts", len(mc.contacts))
 
     mc.set_decrypt_channel_logs(True)
-    chan_indices = await ensure_channels(mc, CHANNEL_NAMES)
+    channel_names = _parse_channels(args.channels)
+    chan_indices = await ensure_channels(mc, channel_names)
     log.info("listening on channels: %s", chan_indices or "(none)")
 
     async def on_direct(event: Event) -> None:
-        await handle_dm(mc, registry, bot_name, region_scope, event)
+        await handle_dm(mc, registry, bot_name, region_scope, args.location, event)
 
     async def on_channel(event: Event) -> None:
-        await handle_channel(mc, registry, bot_name, region_scope, chan_indices, event)
+        await handle_channel(
+            mc, registry, bot_name, region_scope, args.location, chan_indices, event
+        )
 
     mc.subscribe(EventType.CONTACT_MSG_RECV, on_direct)  # pyright: ignore[reportArgumentType]
     mc.subscribe(EventType.CHANNEL_MSG_RECV, on_channel)  # pyright: ignore[reportArgumentType]

@@ -30,12 +30,9 @@ def max_dm_text_bytes() -> int:
 
 def max_channel_text_bytes(sender_name: str) -> int:
     """Max UTF-8 bytes for a channel message (firmware prepends 'name: ')."""
-    prefix_len = len(sender_name.encode("utf-8")) + 2  # ": "
+    prefix_len = len(sender_name.encode()) + 2  # ": "
     return min(MAX_TEXT_PAYLOAD - prefix_len, MAX_FRAME_SIZE - _CHAN_OVERHEAD)
 
-
-# Shown in ping/path replies. If empty, the location prefix is omitted.
-LOCATION = "Freiburg im Breisgau"
 
 CommandFunc = Callable[..., Awaitable[None]]
 
@@ -55,6 +52,7 @@ class Context:
     channel_idx: int | None = None
     msg: dict[str, Any] = field(default_factory=dict)
     contact: dict[str, Any] | None = None
+    location: str | None = None
 
     @property
     def reply_text_limit(self) -> int:
