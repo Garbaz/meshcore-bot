@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from meshcore_bot.commands.base import Context, command
 from meshcore_bot.registry import resolve_path
+
+log = logging.getLogger(__name__)
 
 _COMPASS = [
     "N",
@@ -65,6 +68,38 @@ def _path_location(ctx: Context) -> tuple[float, float, str] | None:
     return None
 
 
+def _contact_coords(contact: dict[str, Any]) -> tuple[float, float] | None:
+    """Sender's companion GPS from their contact entry, if available."""
+    lat: Any = contact.get("adv_lat")
+    lon: Any = contact.get("adv_lon")
+    if (
+        isinstance(lat, int | float)
+        and isinstance(lon, int | float)
+        and not (lat == 0 and lon == 0)
+    ):
+        return (float(lat), float(lon))
+    return None
+
+
+def _lpp_gps(lpp: list[dict[str, Any]] | None) -> tuple[float, float] | None:
+    """Extract GPS coordinates from a telemetry LPP response."""
+    if not lpp:
+        return None
+    for entry in lpp:
+        if entry.get("type") == "gps":
+            val = entry.get("value")
+            if isinstance(val, dict):
+                lat = val.get("latitude")
+                lon = val.get("longitude")
+                if (
+                    isinstance(lat, int | float)
+                    and isinstance(lon, int | float)
+                    and not (lat == 0 and lon == 0)
+                ):
+                    return (float(lat), float(lon))
+    return None
+
+
 # Day variants for codes that differ at night.
 _WMO_NIGHT: dict[int, str] = {
     0: "\U0001f319 clear",
@@ -108,11 +143,17 @@ _GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 _REVERSE_GEOCODE_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client"
 
 
-async def _geocode(place: str) -> tuple[float, float, str] | None:
-    """Resolve a place name to (lat, lon, display_name) via Open-Meteo geocoding."""
+async def _geocode(
+    place: str, ref: tuple[float, float] | None = None
+) -> tuple[float, float, str] | None:
+    """Resolve a place name to (lat, lon, display_name) via Open-Meteo geocoding.
+
+    If *ref* (lat, lon) is given, return the nearest match instead of the
+    first result — so ``Sölden`` near Freiburg picks BW, not Austria.
+    """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(_GEOCODE_URL, params={"name": place, "count": 1})
+            resp = await client.get(_GEOCODE_URL, params={"name": place, "count": 10})
             resp.raise_for_status()
             data = resp.json()
     except (httpx.HTTPError, ValueError):
@@ -120,10 +161,16 @@ async def _geocode(place: str) -> tuple[float, float, str] | None:
     results = data.get("results")
     if not results:
         return None
-    r = results[0]
-    name_parts = [r.get("name", ""), r.get("country", "")]
+    best = results[0]
+    if ref is not None:
+        rlat, rlon = ref
+        best = min(
+            results,
+            key=lambda r: (r["latitude"] - rlat) ** 2 + (r["longitude"] - rlon) ** 2,
+        )
+    name_parts = [best.get("name", ""), best.get("country", "")]
     name = ", ".join(p for p in name_parts if p) or place
-    return (r["latitude"], r["longitude"], name)
+    return (best["latitude"], best["longitude"], name)
 
 
 async def _reverse_geocode(lat: float, lon: float) -> str | None:
@@ -199,30 +246,93 @@ async def _fetch_weather(
     return current, rain_info
 
 
+async def _find_coords(ctx: Context) -> tuple[float, float, str] | None:
+    """Find the sender's area coordinates and a display name.
+
+    Priority: sender's advertised GPS → sender's telemetry GPS →
+    nearest repeater on path → bot's companion GPS → geocode ctx.location.
+    """
+    # 1. Sender's advertised GPS (instant, from contact entry)
+    if ctx.contact is not None:
+        sc = _contact_coords(ctx.contact)
+        if sc is not None:
+            name = await _reverse_geocode(*sc)
+            return (sc[0], sc[1], name or str(ctx.contact.get("adv_name", "")))
+
+    # 2. Sender's telemetry GPS (async request to their device, DMs only)
+    if ctx.contact is not None:
+        try:
+            lpp = await ctx.mc.commands.req_telemetry_sync(
+                ctx.contact, timeout=5
+            )
+            tc = _lpp_gps(lpp)
+            if tc is not None:
+                name = await _reverse_geocode(*tc)
+                return (tc[0], tc[1], name or str(ctx.contact.get("adv_name", "")))
+        except Exception:
+            log.debug("telemetry request failed", exc_info=True)
+
+    # 3. Nearest located repeater on message path
+    coords = _path_location(ctx)
+    if coords is not None:
+        return coords
+
+    # 4. Bot's companion GPS
+    org = ctx.origin
+    if org is not None:
+        name = await _reverse_geocode(*org)
+        if name:
+            return (org[0], org[1], name)
+
+    # 5. Geocode ctx.location
+    if ctx.location:
+        geocoded = await _geocode(ctx.location)
+        if geocoded is not None:
+            return geocoded
+
+    return None
+
+
+async def _resolve_location(
+    ctx: Context, args: list[str]
+) -> tuple[float, float, str] | str | None:
+    """Resolve the weather target location.
+
+    Returns one of:
+    - (lat, lon, name) on success
+    - str (error message) if a location was given but not found
+    - None if no location is available at all
+    """
+    found = await _find_coords(ctx)
+    ref = (found[0], found[1]) if found is not None else None
+
+    if args:
+        place = " ".join(args)
+        coords = await _geocode(place, ref)
+        if coords is None:
+            return f"Could not find: {place}"
+        return coords
+
+    return found
+
+
 @command(["weather", "w"], usage="[place]")
 async def _(ctx: Context, args: list[str]) -> None:
     """Show current weather."""
-    if args:
-        place = " ".join(args)
-        coords = await _geocode(place)
-        if coords is None:
-            await ctx.reply(f"Could not find: {place}")
-            return
-        lat, lon, name = coords
-    else:
-        coords = _path_location(ctx)
-        if coords is not None:
-            lat, lon, _ = coords
-            name = await _reverse_geocode(lat, lon) or ctx.location or "here"
-        else:
-            lat, lon = 0.0, 0.0
-            name = ctx.location or "here"
-
-    result = await _fetch_weather(lat, lon)
+    result = await _resolve_location(ctx, args)
     if result is None:
+        await ctx.reply("No location available. Try: weather <place>")
+        return
+    if isinstance(result, str):
+        await ctx.reply(result)
+        return
+    lat, lon, name = result
+
+    weather_result = await _fetch_weather(lat, lon)
+    if weather_result is None:
         await ctx.reply("Weather data unavailable.")
         return
-    weather, rain = result
+    weather, rain = weather_result
 
     temp = weather["temperature_2m"]
     feels = weather.get("apparent_temperature")
@@ -234,7 +344,7 @@ async def _(ctx: Context, args: list[str]) -> None:
     wind_dir = weather.get("wind_direction_10m")
     humidity = weather.get("relative_humidity_2m")
 
-    lines = [name, cond]
+    lines = [f"{name}:", cond]
     lines.append(
         "\U0001f321\ufe0f "
         + f"{temp:.0f}C"
