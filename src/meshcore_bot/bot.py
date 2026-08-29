@@ -19,15 +19,17 @@ from meshcore.events import Event
 
 from meshcore_bot.commands import (
     Context,
+    command_help,
+    full_help,
     get_command,
     parse_command,
+    usage_line,
 )
-from meshcore_bot.registry import NodeRegistry
+from meshcore_bot.registry import REGISTRY_TTL, NodeRegistry
 
 log = logging.getLogger("meshcore_bot")
 
 CACHE_PATH = Path("~/.cache/meshcore-bot/registry.json").expanduser()
-REGISTRY_TTL = 24 * 3600
 
 # Channel names to listen on (configured at startup from CHANNEL_NAMES).
 # Each entry is the channel *name* as stored on the companion (e.g. "#ping").
@@ -318,8 +320,6 @@ async def handle_channel(
 
 async def dispatch(ctx: Context, text: str, *, mentioned: bool) -> None:
     """Parse *text* and run the matching command, respecting require_mention."""
-    from meshcore_bot.commands import _usage_line, command_help, full_help
-
     parsed = parse_command(text)
     if parsed is None:
         if ctx.is_dm or mentioned:
@@ -331,7 +331,7 @@ async def dispatch(ctx: Context, text: str, *, mentioned: bool) -> None:
     if verb.startswith("?"):
         name = verb[1:]
         if not name:
-            await ctx.reply(full_help(ctx.bot_name))
+            await ctx.reply(full_help())
             return
         h = command_help(name)
         if h is not None:
@@ -343,14 +343,14 @@ async def dispatch(ctx: Context, text: str, *, mentioned: bool) -> None:
     cmd = get_command(verb)
     if cmd is None:
         if ctx.is_dm or mentioned:
-            await ctx.reply("unknown command. try help.")
+            await ctx.reply(f'unknown command "{verb}". try help.')
         return
 
     if not ctx.is_dm and cmd.require_mention and not mentioned:
         return
 
     if len(args) < cmd.min_args:
-        await ctx.reply(f"usage: {_usage_line(cmd)}")
+        await ctx.reply(f"usage: {usage_line(cmd)}")
         return
 
     log.info("dispatching %s (args=%s, mention=%s)", verb, args, mentioned)
