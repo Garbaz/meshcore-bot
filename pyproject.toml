@@ -37,10 +37,10 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
-[[tool.mypy.overrides]]
-module = "meshcore.*"
-ignore_missing_imports = true
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 [[tool.mypy.overrides]]
-module = "bleak.*"
+module = "meshcore.*"
 ignore_missing_imports = true
