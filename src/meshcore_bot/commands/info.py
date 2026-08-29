@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from meshcore_bot.commands.base import Context, command, origin
+from meshcore_bot.commands.base import Context, command
+from meshcore_bot.registry import resolve_path
 
 
 def _compress_route(lines: list[str], max_bytes: int) -> str:
@@ -14,7 +15,7 @@ def _compress_route(lines: list[str], max_bytes: int) -> str:
     byte limit, replaces middle hops with a summary line until it fits.
     """
     text = "\n".join(lines)
-    if len(text.encode("utf-8")) <= max_bytes:
+    if len(text.encode()) <= max_bytes:
         return text
 
     while len(lines) > 3:
@@ -22,7 +23,7 @@ def _compress_route(lines: list[str], max_bytes: int) -> str:
         elided = len(middle)
         lines = [lines[0], f"({elided} hops)", lines[-1]]
         text = "\n".join(lines)
-        if len(text.encode("utf-8")) <= max_bytes:
+        if len(text.encode()) <= max_bytes:
             return text
     return text
 
@@ -36,9 +37,8 @@ async def _(ctx: Context, args: list[str]) -> None:
         if isinstance(path_len, int) and 0 <= path_len < 255
         else "0 hops (flood)"
     )
-    word = "Boop" if ctx.verb.lower() == "beep" else "Pong"
-    if ctx.verb.lower() == "test":
-        word = "Ack"
+    verb = ctx.verb.lower()
+    word = "Boop" if verb == "beep" else "Ack" if verb == "test" else "Pong"
     if ctx.location:
         await ctx.reply(f"{word} from {ctx.location}: {hops}")
     else:
@@ -48,44 +48,32 @@ async def _(ctx: Context, args: list[str]) -> None:
 @command(["path", "r", "route", "trace"])
 async def _(ctx: Context, args: list[str]) -> None:
     """Show the hop-by-hop path of the current message."""
-    from meshcore_bot.registry import resolve_path
-
     msg = ctx.msg
     path_len: Any = msg.get("path_len")
 
     loc = ctx.location or ""
+    region = ctx.region_scope if not ctx.is_dm else ""
+
+    def fmt(body: str) -> str:
+        """Wrap *body* with optional location prefix."""
+        return f"{loc}: {body}" if loc else body
 
     path_hex = str(msg.get("path") or "")
 
     if not isinstance(path_len, int) or path_len < 0 or path_len >= 255:
-        suffix = (
-            f", region {ctx.region_scope}" if not ctx.is_dm and ctx.region_scope else ""
-        )
-        await ctx.reply(
-            f"{loc}: 0 hops (flood){suffix}" if loc else f"0 hops (flood){suffix}"
-        )
+        r = f", region {region}" if region else ""
+        await ctx.reply(fmt(f"0 hops (flood){r}"))
         return
 
     if not path_hex:
-        suffix = (
-            f", region {ctx.region_scope}" if not ctx.is_dm and ctx.region_scope else ""
-        )
-        await ctx.reply(
-            f"{loc}: {path_len} hop(s){suffix}" if loc else f"{path_len} hop(s){suffix}"
-        )
+        r = f", region {region}" if region else ""
+        await ctx.reply(fmt(f"{path_len} hop(s){r}"))
         return
 
-    hash_size: Any = msg.get("path_hash_size")
-    width = hash_size if isinstance(hash_size, int) and hash_size > 0 else 1
-
-    org = origin(ctx.mc)
-    hops = resolve_path(ctx.registry, path_hex, width, org)
-    suffix = (
-        f" on region {ctx.region_scope}" if not ctx.is_dm and ctx.region_scope else ""
-    )
-    header = (
-        f"{loc}: {path_len} hop(s){suffix}:" if loc else f"{path_len} hop(s){suffix}:"
-    )
+    org = ctx.origin
+    hops = resolve_path(ctx.registry, path_hex, ctx.path_hash_width, org)
+    r = f" on region {region}" if region else ""
+    header = fmt(f"{path_len} hop(s){r}:")
     lines = [header]
     for i, hop in enumerate(hops, start=1):
         if hop.node is not None:

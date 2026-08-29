@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from meshcore_bot.commands.base import Context, command, origin
+import httpx
+
+from meshcore_bot.commands.base import Context, command
+from meshcore_bot.registry import resolve_path
 
 _COMPASS = [
     "N",
@@ -38,8 +41,6 @@ def _path_location(ctx: Context) -> tuple[float, float, str] | None:
     first). In both cases we want the hop closest to the sender that has a
     known location.
     """
-    from meshcore_bot.registry import resolve_path
-
     path_hex = str(ctx.msg.get("path") or "")
     if not path_hex and ctx.contact is not None:
         path_hex = str(ctx.contact.get("out_path") or "")
@@ -47,19 +48,8 @@ def _path_location(ctx: Context) -> tuple[float, float, str] | None:
     if not path_hex:
         return None
 
-    hash_size: Any = ctx.msg.get("path_hash_size")
-    if not isinstance(hash_size, int) or hash_size <= 0:
-        hm: Any = ctx.msg.get("path_hash_mode")
-        if isinstance(hm, int) and hm >= 0:
-            hash_size = hm + 1
-        elif ctx.contact is not None:
-            ohm: Any = ctx.contact.get("out_path_hash_mode")
-            hash_size = (ohm + 1) if isinstance(ohm, int) and ohm >= 0 else 1
-        else:
-            hash_size = 1
-
-    org = origin(ctx.mc)
-    hops = resolve_path(ctx.registry, path_hex, hash_size, org)
+    org = ctx.origin
+    hops = resolve_path(ctx.registry, path_hex, ctx.path_hash_width, org)
 
     is_incoming = bool(ctx.msg.get("path"))
     ordered = hops if is_incoming else list(reversed(hops))
@@ -120,8 +110,6 @@ _REVERSE_GEOCODE_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client
 
 async def _geocode(place: str) -> tuple[float, float, str] | None:
     """Resolve a place name to (lat, lon, display_name) via Open-Meteo geocoding."""
-    import httpx
-
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(_GEOCODE_URL, params={"name": place, "count": 1})
@@ -140,8 +128,6 @@ async def _geocode(place: str) -> tuple[float, float, str] | None:
 
 async def _reverse_geocode(lat: float, lon: float) -> str | None:
     """Resolve coordinates to a place name via BigDataCloud."""
-    import httpx
-
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             resp = await client.get(
@@ -167,8 +153,6 @@ async def _fetch_weather(
     - "starts_in": minutes until rain starts (when upcoming)
     - "stops_in": minutes until rain stops (when raining, if known)
     """
-    import httpx
-
     params: dict[str, str | float] = {
         "latitude": lat,
         "longitude": lon,

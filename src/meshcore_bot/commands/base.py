@@ -55,6 +55,31 @@ class Context:
     location: str | None = None
 
     @property
+    def origin(self) -> tuple[float, float] | None:
+        """The companion's own advertised coordinates, or None."""
+        info = self.mc.self_info or {}
+        lat: Any = info.get("adv_lat")
+        lon: Any = info.get("adv_lon")
+        if lat is None or lon is None or (lat == 0 and lon == 0):
+            return None
+        return (float(lat), float(lon))
+
+    @property
+    def path_hash_width(self) -> int:
+        """Path hash width in bytes, falling back through available fields."""
+        hs: Any = self.msg.get("path_hash_size")
+        if isinstance(hs, int) and hs > 0:
+            return hs
+        hm: Any = self.msg.get("path_hash_mode")
+        if isinstance(hm, int) and hm >= 0:
+            return hm + 1
+        if self.contact is not None:
+            ohm: Any = self.contact.get("out_path_hash_mode")
+            if isinstance(ohm, int) and ohm >= 0:
+                return ohm + 1
+        return 1
+
+    @property
     def reply_text_limit(self) -> int:
         """Max UTF-8 bytes for reply text (excluding the @[sender]: prefix)."""
         if self.is_dm:
@@ -80,7 +105,7 @@ class Context:
             await self.mc.commands.set_flood_scope(self.region_scope or "")
             chan_limit = max_channel_text_bytes(self.bot_name)
             prefix = f"@[{self.sender}]: " if self.sender != "unknown" else ""
-            prefix_len = len(prefix.encode("utf-8"))
+            prefix_len = len(prefix.encode())
             limits = (
                 [max(1, chan_limit - prefix_len), chan_limit]
                 if prefix
@@ -116,7 +141,7 @@ def split_lines(lines: list[str], *limits: int) -> list[str]:
     for line in lines:
         candidate = f"{current}\n{line}" if current else line
         limit = limit_for(chunk_idx)
-        if limit == 0 or len(candidate.encode("utf-8")) <= limit:
+        if limit == 0 or len(candidate.encode()) <= limit:
             current = candidate
         else:
             if current:
@@ -229,13 +254,3 @@ def parse_command(text: str) -> tuple[str, list[str]] | None:
     if not tokens:
         return None
     return tokens[0], tokens[1:]
-
-
-def origin(mc: MeshCore) -> tuple[float, float] | None:
-    """Return the companion's own advertised coordinates, or None."""
-    info = mc.self_info or {}
-    lat: Any = info.get("adv_lat")
-    lon: Any = info.get("adv_lon")
-    if lat is None or lon is None or (lat == 0 and lon == 0):
-        return None
-    return (float(lat), float(lon))

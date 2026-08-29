@@ -207,21 +207,23 @@ async def ensure_channels(mc: MeshCore, wanted: list[str]) -> set[int]:
     names.
     """
     existing = await fetch_channels(mc)
-    wanted_lower = {n.lower() for n in wanted}
     found: set[int] = set()
     used_indices: set[int] = set()
+    existing_by_name: dict[str, int] = {}
 
     for ch in existing:
-        used_indices.add(ch["channel_idx"])
-        if str(ch.get("channel_name", "")).lower() in wanted_lower:
-            found.add(ch["channel_idx"])
+        idx = ch["channel_idx"]
+        used_indices.add(idx)
+        name = str(ch.get("channel_name", "")).lower()
+        if name:
+            existing_by_name[name] = idx
+        if name in {n.lower() for n in wanted}:
+            found.add(idx)
 
     # Channel 0 is "public" (no name); start searching from 1 for new channels.
     next_idx = 1
     for name in wanted:
-        if any(
-            str(ch.get("channel_name", "")).lower() == name.lower() for ch in existing
-        ):
+        if name.lower() in existing_by_name:
             continue
         while next_idx in used_indices:
             next_idx += 1
