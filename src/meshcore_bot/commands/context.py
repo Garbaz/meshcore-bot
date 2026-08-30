@@ -117,6 +117,14 @@ class Context:
         )
         if self.path_hash_mode >= 0:
             await self.mc.commands.set_path_hash_mode(self.path_hash_mode)
+
+        # Set flood scope for both DMs and channels so the companion uses
+        # the correct scope when flooding (no direct path).
+        if self.flood_scope is None:
+            await self.mc.commands.force_unscoped()
+        else:
+            await self.mc.commands.set_flood_scope(self.flood_scope)
+
         if self.is_dm and self.contact is not None:
             chunks = split_lines(text.splitlines(), max_dm_text_bytes())
             for chunk in chunks:
@@ -126,10 +134,6 @@ class Context:
                     return
                 await asyncio.sleep(0.2)
         elif self.channel_idx is not None:
-            if self.flood_scope is None:
-                await self.mc.commands.force_unscoped()
-            else:
-                await self.mc.commands.set_flood_scope(self.flood_scope)
             chan_limit = max_channel_text_bytes(self.bot_name)
             prefix = f"@[{self.sender}]: " if self.sender != "unknown" else ""
             prefix_len = len(prefix.encode())

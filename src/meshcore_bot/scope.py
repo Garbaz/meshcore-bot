@@ -61,6 +61,10 @@ class ScopeResolver:
         return self._default_name
 
     @property
+    def default_key(self) -> bytes:
+        return self._default_key
+
+    @property
     def fallback_name(self) -> str:
         return self._fallback_name
 

@@ -92,6 +92,33 @@ async def ensure_channels(
     return configs
 
 
+async def _resolve_reply_scope(
+    scope_resolver: ScopeResolver, log_entry: dict[str, Any] | None
+) -> tuple[bytes | None, str]:
+    """Resolve the flood scope for a reply.
+
+    Mirrors chooseReplyScope() in RoutingPolicy.h:
+    REQUEST > NONE > DEFAULT > NONE.
+
+    Returns (scope_key, scope_name). scope_key is None for unscoped.
+    """
+    resolved = scope_resolver.resolve(log_entry)
+    if resolved is None:
+        # Scope unknowable: use fallback if set, else unscoped.
+        fb = scope_resolver.fallback_key
+        if fb:
+            log.debug(
+                "scope unresolved, using fallback: %s", scope_resolver.fallback_name
+            )
+            return fb, scope_resolver.fallback_name
+        log.debug("scope unresolved, sending unscoped")
+        return None, ""
+    if resolved[1] == b"":
+        return None, ""  # unscoped: force unscoped
+    log.debug("resolved scope: %s", resolved[0])
+    return resolved[1], resolved[0]
+
+
 async def handle_dm(
     mc: MeshCore,
     registry: NodeRegistry,
@@ -100,6 +127,7 @@ async def handle_dm(
     telemetry: TelemetryLogger,
     dedup: MessageDedup,
     startup_time: int,
+    scope_resolver: ScopeResolver,
     event: Event,
 ) -> None:
     msg: dict[str, Any] = event.payload or {}
@@ -130,6 +158,12 @@ async def handle_dm(
 
     sender = str(contact.get("adv_name") or prefix)
     hash_mode: Any = msg.get("path_hash_mode", 0)
+
+    # DMs aren't stored in channels_log, so we can't look up the RF log
+    # entry. The resolver returns None, falling back to the companion's
+    # default scope — the same logic as channel messages.
+    flood_scope, flood_scope_name = await _resolve_reply_scope(scope_resolver, None)
+
     ctx = Context(
         mc=mc,
         registry=registry,
@@ -137,6 +171,8 @@ async def handle_dm(
         bot_name=bot_name,
         path_hash_mode=hash_mode if isinstance(hash_mode, int) else 0,
         is_dm=True,
+        flood_scope=flood_scope,
+        flood_scope_name=flood_scope_name,
         contact=contact,
         msg=msg,
         location=location,
@@ -218,27 +254,11 @@ async def handle_channel(
         return
 
     # Resolve the flood scope from the RF log entry so the reply uses the
-    # same scope as the incoming message.  Mirrors chooseReplyScope()
-    # in RoutingPolicy.h: REQUEST > NONE > DEFAULT > NONE.
+    # same scope as the incoming message.
     log_entry = await _find_chan_log_entry(mc, msg)
-    resolved = scope_resolver.resolve(log_entry)
-    flood_scope_name = ""
-    if resolved is None:
-        # Scope unknowable: use fallback if set, else unscoped.
-        fb = scope_resolver.fallback_key
-        if fb:
-            flood_scope = fb
-            flood_scope_name = scope_resolver.fallback_name
-            log.debug("scope unresolved, using fallback: %s", flood_scope_name)
-        else:
-            flood_scope = None
-            log.debug("scope unresolved, sending unscoped")
-    elif resolved[1] == b"":
-        flood_scope = None  # unscoped: force unscoped
-    else:
-        flood_scope = resolved[1]
-        flood_scope_name = resolved[0]
-        log.debug("resolved scope: %s", flood_scope_name)
+    flood_scope, flood_scope_name = await _resolve_reply_scope(
+        scope_resolver, log_entry
+    )
 
     hash_mode: Any = msg.get("path_hash_mode", 0)
     ctx = Context(
@@ -425,6 +445,7 @@ async def main(args: argparse.Namespace) -> None:
             telemetry,
             dedup,
             startup_time,
+            scope_resolver,
             event,
         )
 

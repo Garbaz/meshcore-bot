@@ -126,7 +126,9 @@ def _usage_suffix(specs: list[ParamSpec]) -> str:
     return " ".join(parts)
 
 
-def _parse_args(specs: list[ParamSpec], tokens: list[str]) -> tuple[list[Any], str | None]:
+def _parse_args(
+    specs: list[ParamSpec], tokens: list[str]
+) -> tuple[list[Any], str | None]:
     """Parse *tokens* against *specs*.
 
     Returns ``(values, error)``.  On success, *error* is ``None`` and *values*
@@ -149,7 +151,9 @@ def _parse_args(specs: list[ParamSpec], tokens: list[str]) -> tuple[list[Any], s
             try:
                 values.append(spec._coerce(remaining[0]))
             except ValueError:
-                if inspect.isclass(spec.inner_type) and issubclass(spec.inner_type, Enum):
+                if inspect.isclass(spec.inner_type) and issubclass(
+                    spec.inner_type, Enum
+                ):
                     choices = "|".join(e.value for e in spec.inner_type)
                     return [], f"invalid {spec.name}: {remaining[0]} (try: {choices})"
                 return [], f"invalid {spec.name}: {remaining[0]}"
@@ -264,9 +268,13 @@ def command(
 
     def decorator(obj: type | CommandFunc) -> type | CommandFunc:
         if inspect.isclass(obj):
-            cmd = _build_class_command(obj, alias_list, dm_only, secret, allowed_everywhere)
+            cmd = _build_class_command(
+                obj, alias_list, dm_only, secret, allowed_everywhere
+            )
         else:
-            cmd = _build_func_command(obj, alias_list, dm_only, secret, allowed_everywhere)  # pyright: ignore[reportArgumentType]
+            cmd = _build_func_command(
+                obj, alias_list, dm_only, secret, allowed_everywhere
+            )  # pyright: ignore[reportArgumentType]
         for a in alias_list:
             _commands[a.lower()] = cmd
         return obj
@@ -334,7 +342,9 @@ def _build_class_command(
         raise TypeError(f"command class {cls.__name__!r} has no subcommands")
 
     if default_sub is not None and default_sub not in subcommands:
-        raise TypeError(f"default subcommand {default_sub!r} not found in {cls.__name__!r}")
+        raise TypeError(
+            f"default subcommand {default_sub!r} not found in {cls.__name__!r}"
+        )
 
     cmd = Command(
         aliases=aliases,
@@ -352,7 +362,9 @@ def get_command(name: str) -> Command | None:
     return _commands.get(name.lower())
 
 
-def list_commands(is_dm: bool = True, channel_allowed: set[str] | None = None) -> list[Command]:
+def list_commands(
+    is_dm: bool = True, channel_allowed: set[str] | None = None
+) -> list[Command]:
     """All registered commands, deduplicated (one entry per canonical name).
 
     Secret commands are excluded. When *is_dm* is False, dm_only commands
