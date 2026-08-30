@@ -6,7 +6,7 @@
 #   DEST_DIR         optional: remote directory (default: ~/meshcore-bot/)
 #   SUPERVISOR_NAME  optional: supervisor program name (default: meshcore-bot)
 
-set -euo pipefail
+set -euxo pipefail
 
 DEST="${1:-}"
 DEST_DIR="${2:-~/meshcore-bot/}"

@@ -123,7 +123,7 @@ class TelemetryLogger:
                 return
 
             entry["readings"] += 1
-            record = {"ts": int(time.time()), "data": lpp}
+            record = {"time": int(time.time()), "data": lpp}
             data_path = self._state_dir / f"{pubkey}.jsonl"
             with data_path.open("a") as f:
                 f.write(json.dumps(record) + "\n")
