@@ -9,6 +9,7 @@ REGISTRY_TTL (stale data is kept if a refresh fails).
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 import logging
 import time
@@ -41,7 +42,21 @@ SOURCES = [
     Source("corescope", "https://analyzer.00id.net/api/nodes", "corescope"),
 ]
 
+REGION_SOURCES = [
+    Source(
+        "meshcore-regions",
+        "https://raw.githubusercontent.com/marcelverdult/meshcore-regions/main/index.json",
+        "regions",
+    ),
+]
+
 RELAY_ROLES = {"repeater", "room"}  # only these forward packets, per MeshCore
+
+
+def scope_key(code: str) -> bytes:
+    """Derive the 16-byte flood scope key for a ``#hashtag`` region."""
+    name = code if code.startswith("#") else "#" + code
+    return hashlib.sha256(name.encode("utf-8")).digest()[:16]
 
 
 @dataclass
@@ -52,6 +67,12 @@ class Node:
     lat: float | None
     lon: float | None
     last_seen: int | None  # unix epoch, best effort
+
+
+@dataclass(frozen=True)
+class Region:
+    code: str  # e.g. "at-bgld" (hashtag without #)
+    name: str  # human-readable, e.g. "bgld"
 
 
 def _iso_to_epoch(value: Any) -> int | None:
@@ -139,16 +160,33 @@ _PARSERS = {
 class NodeRegistry:
     """Merged, cached view of all sources; prefix lookups via binary search."""
 
-    def __init__(self, cache_path: Path, sources: list[Source] | None = None):
+    def __init__(
+        self,
+        cache_path: Path,
+        sources: list[Source] | None = None,
+        region_sources: list[Source] | None = None,
+    ):
         self._cache_path = cache_path
         self._sources = sources or SOURCES
+        self._region_sources = region_sources or REGION_SOURCES
         self._nodes: list[Node] = []
         self._keys: list[str] = []  # sorted public keys, parallel to _nodes
         self._by_key: dict[str, Node] = {}
+        self._regions: list[Region] = []
+        self._scope_keys: dict[bytes, str] = {}  # scope_key -> "#code"
 
     @property
     def nodes(self) -> list[Node]:
         return self._nodes
+
+    @property
+    def regions(self) -> list[Region]:
+        return self._regions
+
+    @property
+    def scope_keys(self) -> dict[bytes, str]:
+        """Mapping of 16-byte scope keys to ``"#code"`` region names."""
+        return self._scope_keys
 
     async def load(self, ttl: int = REGISTRY_TTL, force: bool = False) -> None:
         cache = self._read_cache()
@@ -173,15 +211,38 @@ class NodeRegistry:
                 continue
             cache[source.name] = {"fetched_at": now, "nodes": nodes}
             absorb(nodes, source.name)
+
+        merged_regions: dict[str, Region] = {}
+        for source in self._region_sources:
+            entry = cache.get(source.name)
+            fresh = entry is not None and now - entry["fetched_at"] < ttl
+            if entry is not None and fresh and not force:
+                for r in entry.get("regions", []):
+                    merged_regions.setdefault(r.code, r)
+                continue
+            regions = await self._fetch_regions(source)
+            if regions is None:
+                if entry is not None:
+                    log.warning("%s: fetch failed, using stale cache", source.name)
+                    for r in entry.get("regions", []):
+                        merged_regions.setdefault(r.code, r)
+                continue
+            cache[source.name] = {"fetched_at": now, "regions": regions}
+            for r in regions:
+                merged_regions.setdefault(r.code, r)
+
         self._write_cache(cache)
         relays = [n for n, _ in merged.values() if n.role in RELAY_ROLES]
         self._nodes = sorted(relays, key=lambda n: n.public_key)
         self._keys = [n.public_key for n in self._nodes]
         self._by_key = {n.public_key: n for n in self._nodes}
+        self._regions = sorted(merged_regions.values(), key=lambda r: r.code)
+        self._scope_keys = {scope_key(r.code): "#" + r.code for r in self._regions}
         log.info(
-            "registry loaded: %d relay nodes from %d sources",
+            "registry loaded: %d relay nodes from %d sources, %d regions",
             len(self._nodes),
             len(self._sources),
+            len(self._regions),
         )
 
     async def _fetch(self, source: Source) -> list[Node] | None:
@@ -217,28 +278,56 @@ class NodeRegistry:
         )
         return nodes
 
+    async def _fetch_regions(self, source: Source) -> list[Region] | None:
+        try:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": USER_AGENT},
+                timeout=FETCH_TIMEOUT,
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(source.url)
+                resp.raise_for_status()
+                payload = resp.json()
+        except (httpx.HTTPError, ValueError) as ex:
+            log.warning("%s: fetch failed: %s", source.name, ex)
+            return None
+        flat = payload.get("flat", []) if isinstance(payload, dict) else []
+        regions: list[Region] = []
+        for raw in flat:
+            if not isinstance(raw, dict):
+                continue
+            code = raw.get("path", "")
+            name = raw.get("name", "")
+            if code:
+                regions.append(Region(code=code, name=name))
+        log.info("%s: fetched %d regions", source.name, len(regions))
+        return regions
+
     def _read_cache(self) -> dict[str, dict[str, Any]]:
         try:
             data = json.loads(self._cache_path.read_text())
             out = {}
             for name, entry in data.items():
-                out[name] = {
-                    "fetched_at": int(entry["fetched_at"]),
-                    "nodes": [Node(**n) for n in entry["nodes"]],
-                }
+                item: dict[str, Any] = {"fetched_at": int(entry["fetched_at"])}
+                if "nodes" in entry:
+                    item["nodes"] = [Node(**n) for n in entry["nodes"]]
+                if "regions" in entry:
+                    item["regions"] = [Region(**r) for r in entry["regions"]]
+                out[name] = item
             return out
         except (OSError, ValueError, KeyError, TypeError):
             return {}
 
     def _write_cache(self, cache: dict[str, dict[str, Any]]) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            name: {
-                "fetched_at": entry["fetched_at"],
-                "nodes": [asdict(n) for n in entry["nodes"]],
-            }
-            for name, entry in cache.items()
-        }
+        data = {}
+        for name, entry in cache.items():
+            item: dict[str, Any] = {"fetched_at": entry["fetched_at"]}
+            if "nodes" in entry:
+                item["nodes"] = [asdict(n) for n in entry["nodes"]]
+            if "regions" in entry:
+                item["regions"] = [asdict(r) for r in entry["regions"]]
+            data[name] = item
         tmp = self._cache_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
         tmp.replace(self._cache_path)

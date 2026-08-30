@@ -23,7 +23,9 @@ async def _(ctx: Context, args: list[str]) -> None:
         "servus",
         "salut",
         "bonjour",
-    ]
+    ],
+    secret=True,
+    allowed_everywhere=True,
 )
 async def _(ctx: Context, args: list[str]) -> None:
     """Greetings."""

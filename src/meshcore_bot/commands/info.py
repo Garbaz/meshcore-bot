@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meshcore_bot.commands.base import Context, command
+from meshcore_bot.commands.base import Context, Scope, _hops_str, command
 from meshcore_bot.registry import resolve_path
 
 
@@ -28,15 +28,10 @@ def _compress_route(lines: list[str], max_bytes: int) -> str:
     return text
 
 
-@command(["ping", "p", "beep", "test"], require_mention=False)
+@command(["ping", "p", "beep", "test"], scope=Scope.OPEN)
 async def _(ctx: Context, args: list[str]) -> None:
     """Test connectivity."""
-    path_len: Any = ctx.msg.get("path_len")
-    hops = (
-        f"{path_len} hop(s)"
-        if isinstance(path_len, int) and 0 <= path_len < 255
-        else "0 hops (flood)"
-    )
+    hops = _hops_str(ctx.msg.get("path_len"))
     verb = ctx.verb.lower()
     word = "Boop" if verb == "beep" else "Ack" if verb == "test" else "Pong"
     if ctx.location:
@@ -45,14 +40,14 @@ async def _(ctx: Context, args: list[str]) -> None:
         await ctx.reply(f"{word}: {hops}")
 
 
-@command(["path", "r", "route", "trace"])
+@command(["path", "t", "route", "trace"])
 async def _(ctx: Context, args: list[str]) -> None:
     """Show the hop-by-hop path of the current message."""
     msg = ctx.msg
     path_len: Any = msg.get("path_len")
 
     loc = ctx.location or ""
-    region = ctx.region_scope if not ctx.is_dm else ""
+    region = ctx.flood_scope_name if not ctx.is_dm else ""
 
     def fmt(body: str) -> str:
         """Wrap *body* with optional location prefix."""
@@ -62,18 +57,18 @@ async def _(ctx: Context, args: list[str]) -> None:
 
     if not isinstance(path_len, int) or path_len < 0 or path_len >= 255:
         r = f", region {region}" if region else ""
-        await ctx.reply(fmt(f"0 hops (flood){r}"))
+        await ctx.reply(fmt(f"{_hops_str(path_len)}{r}"))
         return
 
     if not path_hex:
         r = f", region {region}" if region else ""
-        await ctx.reply(fmt(f"{path_len} hop(s){r}"))
+        await ctx.reply(fmt(f"{_hops_str(path_len)}{r}"))
         return
 
     org = ctx.origin
     hops = resolve_path(ctx.registry, path_hex, ctx.path_hash_width, org)
     r = f" on region {region}" if region else ""
-    header = fmt(f"{path_len} hop(s){r}:")
+    header = fmt(f"{_hops_str(path_len)}{r}:")
     lines = [header]
     for i, hop in enumerate(hops, start=1):
         if hop.node is not None:

@@ -9,6 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "meshcore",
+    "parsy>=2.2",
     "pyserial>=3.5",
 ]
 
@@ -27,20 +28,10 @@ meshcore = { git = "https://github.com/meshcore-dev/meshcore_py" }
 
 [dependency-groups]
 dev = [
-    "mypy>=2.3.1",
     "pyright>=1.1.400",
     "ruff>=0.16.4",
 ]
 
-[tool.mypy]
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-
-[[tool.mypy.overrides]]
-module = "meshcore.*"
-ignore_missing_imports = true

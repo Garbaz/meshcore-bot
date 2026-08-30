@@ -68,19 +68,6 @@ def _path_location(ctx: Context) -> tuple[float, float, str] | None:
     return None
 
 
-def _contact_coords(contact: dict[str, Any]) -> tuple[float, float] | None:
-    """Sender's companion GPS from their contact entry, if available."""
-    lat: Any = contact.get("adv_lat")
-    lon: Any = contact.get("adv_lon")
-    if (
-        isinstance(lat, int | float)
-        and isinstance(lon, int | float)
-        and not (lat == 0 and lon == 0)
-    ):
-        return (float(lat), float(lon))
-    return None
-
-
 def _lpp_gps(lpp: list[dict[str, Any]] | None) -> tuple[float, float] | None:
     """Extract GPS coordinates from a telemetry LPP response."""
     if not lpp:
@@ -157,6 +144,7 @@ async def _geocode(
             resp.raise_for_status()
             data = resp.json()
     except (httpx.HTTPError, ValueError):
+        log.warning("geocode failed for %r", place)
         return None
     results = data.get("results")
     if not results:
@@ -184,6 +172,7 @@ async def _reverse_geocode(lat: float, lon: float) -> str | None:
             resp.raise_for_status()
             data = resp.json()
     except (httpx.HTTPError, ValueError):
+        log.warning("reverse geocode failed for %s,%s", lat, lon)
         return None
     name_parts = [data.get("city") or data.get("locality"), data.get("countryName")]
     return ", ".join(p for p in name_parts if p) or None
@@ -218,6 +207,7 @@ async def _fetch_weather(
             resp.raise_for_status()
             data = resp.json()
     except (httpx.HTTPError, ValueError):
+        log.warning("weather fetch failed for %s,%s", lat, lon)
         return None
     current = data.get("current")
     if not isinstance(current, dict):
@@ -249,22 +239,18 @@ async def _fetch_weather(
 async def _find_coords(ctx: Context) -> tuple[float, float, str] | None:
     """Find the sender's area coordinates and a display name.
 
-    Priority: sender's advertised GPS → sender's telemetry GPS →
-    nearest repeater on path → bot's companion GPS → geocode ctx.location.
+    Priority: nearest repeater on path → sender's telemetry GPS →
+    bot's companion GPS → geocode ctx.location.
     """
-    # 1. Sender's advertised GPS (instant, from contact entry)
-    if ctx.contact is not None:
-        sc = _contact_coords(ctx.contact)
-        if sc is not None:
-            name = await _reverse_geocode(*sc)
-            return (sc[0], sc[1], name or str(ctx.contact.get("adv_name", "")))
+    # 1. Nearest located repeater on message path (live, from current message)
+    coords = _path_location(ctx)
+    if coords is not None:
+        return coords
 
     # 2. Sender's telemetry GPS (async request to their device, DMs only)
     if ctx.contact is not None:
         try:
-            lpp = await ctx.mc.commands.req_telemetry_sync(
-                ctx.contact, timeout=5
-            )
+            lpp = await ctx.mc.commands.req_telemetry_sync(ctx.contact, timeout=10)
             tc = _lpp_gps(lpp)
             if tc is not None:
                 name = await _reverse_geocode(*tc)
@@ -272,19 +258,14 @@ async def _find_coords(ctx: Context) -> tuple[float, float, str] | None:
         except Exception:
             log.debug("telemetry request failed", exc_info=True)
 
-    # 3. Nearest located repeater on message path
-    coords = _path_location(ctx)
-    if coords is not None:
-        return coords
-
-    # 4. Bot's companion GPS
+    # 3. Bot's companion GPS
     org = ctx.origin
     if org is not None:
         name = await _reverse_geocode(*org)
         if name:
             return (org[0], org[1], name)
 
-    # 5. Geocode ctx.location
+    # 4. Geocode ctx.location
     if ctx.location:
         geocoded = await _geocode(ctx.location)
         if geocoded is not None:

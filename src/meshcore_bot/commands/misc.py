@@ -7,7 +7,7 @@ from urllib.parse import quote
 from meshcore_bot.commands.base import Context, command, command_help, full_help
 
 
-@command(["help", "h", "?"], usage="[command]")
+@command(["help", "h", "?"], usage="[command]", allowed_everywhere=True)
 async def _(ctx: Context, args: list[str]) -> None:
     """Show help."""
     if args:
@@ -17,7 +17,7 @@ async def _(ctx: Context, args: list[str]) -> None:
             return
         await ctx.reply(h)
         return
-    await ctx.reply(full_help())
+    await ctx.reply(full_help(ctx.is_dm, ctx.channel_allowed))
 
 
 @command(["add", "a", "key"])

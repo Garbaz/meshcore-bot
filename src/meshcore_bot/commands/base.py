@@ -1,19 +1,19 @@
-"""Command framework: Context, registry, parsing, and help generation."""
+"""Command framework: Context, registry, and help generation."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from meshcore import MeshCore
 
     from meshcore_bot.registry import NodeRegistry
-
+    from meshcore_bot.telemetry import TelemetryLogger
 log = logging.getLogger("meshcore_bot.commands")
 
 MAX_TEXT_PAYLOAD = 160  # firmware MAX_TEXT_LEN (10 * CIPHER_BLOCK_SIZE)
@@ -37,6 +37,19 @@ def max_channel_text_bytes(sender_name: str) -> int:
 CommandFunc = Callable[..., Awaitable[None]]
 
 
+class Scope(Enum):
+    """Where a command is available.
+
+    - DM_ONLY: DMs only, silently ignored in channels
+    - MENTION: always in DMs, requires @mention in channels
+    - OPEN: always responds (channels + DMs)
+    """
+
+    DM_ONLY = "dm_only"
+    MENTION = "mention"
+    OPEN = "open"
+
+
 @dataclass
 class Context:
     """Everything a command handler needs to do its job and reply."""
@@ -45,14 +58,21 @@ class Context:
     registry: NodeRegistry
     sender: str  # display name of the sender ("unknown" if not determinable)
     bot_name: str  # this companion's advertised name
-    region_scope: str  # default flood scope name (e.g. "#de-bw") or "" if none
     is_dm: bool
     path_hash_mode: int = 0  # hash mode of the incoming message
+    flood_scope: bytes | None = (
+        b"\0" * 16
+    )  # 16-byte scope key, b"\0"*16 = default, None = unscoped
+    flood_scope_name: str = ""  # display name for the flood scope (e.g. "#de-bw")
     verb: str = ""  # the actual name/alias the user invoked (e.g. "route", "trace")
     channel_idx: int | None = None
+    channel_name: str = ""  # name of the channel (e.g. "#ping") or "" for DMs
+    channel_allowed: set[str] | None = None  # allowed command names, or None for all
     msg: dict[str, Any] = field(default_factory=dict)
     contact: dict[str, Any] | None = None
     location: str | None = None
+    telemetry: TelemetryLogger | None = None
+    budget_check: Callable[[], bool] | None = None  # channel budget; None for DMs
 
     @property
     def origin(self) -> tuple[float, float] | None:
@@ -96,13 +116,16 @@ class Context:
         if self.is_dm and self.contact is not None:
             chunks = split_lines(text.splitlines(), max_dm_text_bytes())
             for chunk in chunks:
-                result = await self.mc.commands.send_msg(self.contact, chunk)
-                if result.is_error():
-                    log.error("send failed: %s", result.payload)
+                result = await self.mc.commands.send_msg_with_retry(self.contact, chunk)
+                if result is None:
+                    log.error("DM send failed (no ack) for %s", self.sender)
                     return
                 await asyncio.sleep(0.2)
         elif self.channel_idx is not None:
-            await self.mc.commands.set_flood_scope(self.region_scope or "")
+            if self.flood_scope is None:
+                await self.mc.commands.force_unscoped()
+            else:
+                await self.mc.commands.set_flood_scope(self.flood_scope)
             chan_limit = max_channel_text_bytes(self.bot_name)
             prefix = f"@[{self.sender}]: " if self.sender != "unknown" else ""
             prefix_len = len(prefix.encode())
@@ -153,13 +176,23 @@ def split_lines(lines: list[str], *limits: int) -> list[str]:
     return chunks or [""]
 
 
+def _hops_str(path_len: Any) -> str:
+    """Format a hop count, handling flood (255) and direct (0)."""
+    if not isinstance(path_len, int) or path_len < 0 or path_len >= 255:
+        return "flood"
+    if path_len == 0:
+        return "direct"
+    return f"{path_len} hop{'s' if path_len != 1 else ''}"
+
+
 @dataclass
 class Command:
     aliases: list[str]
     func: CommandFunc
-    require_mention: bool
+    scope: Scope
     min_args: int
     secret: bool
+    allowed_everywhere: bool
     usage: str = ""
 
     @property
@@ -175,7 +208,8 @@ def command(
     *,
     min_args: int = 0,
     secret: bool = False,
-    require_mention: bool = True,
+    scope: Scope = Scope.MENTION,
+    allowed_everywhere: bool = False,
     usage: str = "",
 ) -> Callable[[CommandFunc], CommandFunc]:
     """Register *func* as a bot command.
@@ -183,12 +217,15 @@ def command(
     *aliases* is the canonical name (first entry) plus any aliases. A bare
     string is treated as a single-element list. *usage* is the argument hint
     appended to the name in help output (e.g. ``"[place]"``). Secret commands
-    are not shown in help.
+    are not shown in help. *scope* controls where the command is available.
+    *allowed_everywhere* bypasses per-channel command restrictions.
     """
     alias_list = [aliases] if isinstance(aliases, str) else list(aliases)
 
     def decorator(func: CommandFunc) -> CommandFunc:
-        cmd = Command(alias_list, func, require_mention, min_args, secret, usage)
+        cmd = Command(
+            alias_list, func, scope, min_args, secret, allowed_everywhere, usage
+        )
         for a in alias_list:
             _commands[a.lower()] = cmd
         return func
@@ -200,15 +237,29 @@ def get_command(name: str) -> Command | None:
     return _commands.get(name.lower())
 
 
-def list_commands() -> list[Command]:
+def list_commands(
+    is_dm: bool = True, channel_allowed: set[str] | None = None
+) -> list[Command]:
     """All registered commands, deduplicated (one entry per canonical name).
 
-    Secret commands are excluded.
+    Secret commands are excluded. When *is_dm* is False, DM_ONLY commands
+    are also excluded.  When *channel_allowed* is not None (a restricted
+    channel), commands that are neither ``allowed_everywhere`` nor in
+    *channel_allowed* are also excluded.
     """
     seen: set[str] = set()
     out: list[Command] = []
     for cmd in _commands.values():
         if cmd.name not in seen and not cmd.secret:
+            if not is_dm and cmd.scope is Scope.DM_ONLY:
+                continue
+            if (
+                not is_dm
+                and channel_allowed is not None
+                and not cmd.allowed_everywhere
+                and cmd.name not in channel_allowed
+            ):
+                continue
             seen.add(cmd.name)
             out.append(cmd)
     return out
@@ -224,10 +275,10 @@ def _doc_body(cmd: Command) -> str:
     return (cmd.func.__doc__ or "(no help available)").strip() or "(no help available)"
 
 
-def full_help() -> str:
+def full_help(is_dm: bool = True, channel_allowed: set[str] | None = None) -> str:
     """The text shown for ``help`` / ``?`` with no arguments."""
     lines = ["mention or DM me:"]
-    for cmd in sorted(list_commands(), key=lambda c: c.name):
+    for cmd in sorted(list_commands(is_dm, channel_allowed), key=lambda c: c.name):
         lines.append(f"  {usage_line(cmd)}")
     lines.append("(?cmd for details)")
     return "\n".join(lines)
@@ -243,14 +294,3 @@ def command_help(name: str) -> str | None:
     if extra:
         lines.append(f"Aliases: {', '.join(extra)}")
     return "\n".join(lines)
-
-
-def parse_command(text: str) -> tuple[str, list[str]] | None:
-    """Split *text* into ``(verb, args)`` using shell-style tokenisation."""
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        return None
-    if not tokens:
-        return None
-    return tokens[0], tokens[1:]

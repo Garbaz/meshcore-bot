@@ -9,25 +9,25 @@ shows the full help; ``?<name>`` shows details for a specific command.
 from __future__ import annotations
 
 # Import command modules to trigger registration.
-from meshcore_bot.commands import info, misc, secret, weather  # noqa: F401
+from meshcore_bot.commands import info, misc, record, secret, weather  # noqa: F401
 from meshcore_bot.commands.base import (
     Context,
+    Scope,
     command,
     command_help,
     full_help,
     get_command,
     list_commands,
-    parse_command,
     usage_line,
 )
 
 __all__ = [
     "Context",
+    "Scope",
     "command",
     "command_help",
     "full_help",
     "get_command",
     "list_commands",
-    "parse_command",
     "usage_line",
 ]
