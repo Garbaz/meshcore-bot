@@ -361,14 +361,16 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
 
 
 async def main(args: argparse.Namespace) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG
-        if args.debug
-        else logging.ERROR
-        if args.quiet
-        else logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    level = (
+        logging.DEBUG if args.debug else logging.ERROR if args.quiet else logging.INFO
     )
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    )
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level)
 
     registry = NodeRegistry(Path(args.cache_path))
     log.info("loading node registry (may take a while on first run)...")
@@ -378,6 +380,7 @@ async def main(args: argparse.Namespace) -> None:
         len(registry.nodes),
         len(registry.regions),
     )
+    registry.start_background_refresh(interval=int(args.registry_ttl * 3600))
 
     mc = await connect(args)
     if mc is None:
@@ -475,6 +478,7 @@ async def main(args: argparse.Namespace) -> None:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
         telemetry.stop()
+        registry.stop_background_refresh()
     finally:
         await mc.disconnect()
         log.info("disconnected")

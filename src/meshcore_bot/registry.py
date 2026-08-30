@@ -1,14 +1,14 @@
 """Online repeater registries for resolving path-hop key prefixes to names.
 
 Sources are tried in order (official first, community mirrors after). Each
-source is fetched once, normalized, and merged into a single local cache file;
-first source that knows a node wins. The cache is refreshed when older than
-REGISTRY_TTL (stale data is kept if a refresh fails).
+source is fetched in parallel, normalized, and merged into a single local
+cache file; first source that knows a node wins. The cache is refreshed in
+the background by a periodic task so lookups never block.
 """
 
+import asyncio
 import bisect
 import hashlib
-import json
 import logging
 import time
 from dataclasses import asdict, dataclass
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import orjson
 
 log = logging.getLogger(__name__)
 
@@ -156,7 +157,13 @@ _PARSERS = {
 
 
 class NodeRegistry:
-    """Merged, cached view of all sources; prefix lookups via binary search."""
+    """Merged, cached view of all sources; prefix lookups via binary search.
+
+    The registry is loaded once at startup (``load``) and then kept fresh by
+    a background task (``start_background_refresh``). Lookups always read
+    in-memory indexes that are swapped atomically after a refresh, so they
+    never block on network I/O.
+    """
 
     def __init__(
         self,
@@ -172,6 +179,7 @@ class NodeRegistry:
         self._by_key: dict[str, Node] = {}
         self._regions: list[Region] = []
         self._scope_keys: dict[bytes, str] = {}  # scope_key -> "#code"
+        self._refresh_task: asyncio.Task[None] | None = None
 
     @property
     def nodes(self) -> list[Node]:
@@ -186,61 +194,138 @@ class NodeRegistry:
         """Mapping of 16-byte scope keys to ``"#code"`` region names."""
         return self._scope_keys
 
-    async def load(self, ttl: int = REGISTRY_TTL, force: bool = False) -> None:
+    async def load(self, ttl: int = REGISTRY_TTL) -> None:
+        """Initial load: read cache, fetch stale sources in parallel."""
         cache = self._read_cache()
         now = int(time.time())
-        merged: dict[str, tuple[Node, str]] = {}
 
-        def absorb(nodes: list[Node], source_name: str) -> None:
-            for node in nodes:
-                merged.setdefault(node.public_key, (node, source_name))
+        node_results = await asyncio.gather(
+            *(self._refresh_source(s, cache, now, ttl) for s in self._sources)
+        )
+        region_results = await asyncio.gather(
+            *(
+                self._refresh_region_source(s, cache, now, ttl)
+                for s in self._region_sources
+            )
+        )
 
+        if any(node_results) or any(region_results):
+            self._write_cache(cache)
+
+        self._build_indexes(cache, now)
+
+    async def refresh(self) -> None:
+        """Fetch all sources (ignoring TTL), rebuild, and swap indexes."""
+        cache = self._read_cache()
+        now = int(time.time())
+
+        await asyncio.gather(
+            *(self._refresh_source(s, cache, now, ttl=0) for s in self._sources)
+        )
+        await asyncio.gather(
+            *(
+                self._refresh_region_source(s, cache, now, ttl=0)
+                for s in self._region_sources
+            )
+        )
+
+        self._write_cache(cache)
+        self._build_indexes(cache, now)
+
+    def start_background_refresh(self, interval: int = REGISTRY_TTL // 2) -> None:
+        """Start a periodic background refresh task."""
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._refresh_loop(interval))
+
+    def stop_background_refresh(self) -> None:
+        """Cancel the background refresh task."""
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            self._refresh_task = None
+
+    async def _refresh_loop(self, interval: int) -> None:
+        """Periodically refresh the registry."""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                log.info("registry: background refresh starting")
+                await self.refresh()
+                log.info("registry: background refresh done")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("registry: background refresh failed", exc_info=True)
+
+    async def _refresh_source(
+        self, source: Source, cache: dict[str, Any], now: int, ttl: int
+    ) -> bool:
+        """Fetch *source* if stale (or ttl=0). Returns True if cache changed."""
+        entry = cache.get(source.name)
+        if entry is not None and ttl > 0 and now - entry["fetched_at"] < ttl:
+            return False
+
+        nodes = await self._fetch(source)
+        if nodes is None:
+            if entry is not None:
+                log.warning("%s: fetch failed, using stale cache", source.name)
+            return False
+
+        cache[source.name] = {"fetched_at": now, "nodes": nodes}
+        return True
+
+    async def _refresh_region_source(
+        self, source: Source, cache: dict[str, Any], now: int, ttl: int
+    ) -> bool:
+        """Fetch region *source* if stale (or ttl=0). Returns True if changed."""
+        entry = cache.get(source.name)
+        if entry is not None and ttl > 0 and now - entry["fetched_at"] < ttl:
+            return False
+
+        regions = await self._fetch_regions(source)
+        if regions is None:
+            if entry is not None:
+                log.warning("%s: fetch failed, using stale cache", source.name)
+            return False
+
+        cache[source.name] = {"fetched_at": now, "regions": regions}
+        return True
+
+    def _build_indexes(self, cache: dict[str, Any], now: int) -> None:
+        """Merge cached sources into in-memory lookup indexes."""
+        merged: dict[str, Node] = {}
         for source in self._sources:
             entry = cache.get(source.name)
-            fresh = entry is not None and now - entry["fetched_at"] < ttl
-            if entry is not None and fresh and not force:
-                absorb(entry["nodes"], source.name)
+            if entry is None:
                 continue
-            nodes = await self._fetch(source)
-            if nodes is None:
-                if entry is not None:
-                    log.warning("%s: fetch failed, using stale cache", source.name)
-                    absorb(entry["nodes"], source.name)
-                continue
-            cache[source.name] = {"fetched_at": now, "nodes": nodes}
-            absorb(nodes, source.name)
+            for node in entry["nodes"]:
+                merged.setdefault(node.public_key, node)
 
         merged_regions: dict[str, Region] = {}
         for source in self._region_sources:
             entry = cache.get(source.name)
-            fresh = entry is not None and now - entry["fetched_at"] < ttl
-            if entry is not None and fresh and not force:
-                for r in entry.get("regions", []):
-                    merged_regions.setdefault(r.code, r)
+            if entry is None:
                 continue
-            regions = await self._fetch_regions(source)
-            if regions is None:
-                if entry is not None:
-                    log.warning("%s: fetch failed, using stale cache", source.name)
-                    for r in entry.get("regions", []):
-                        merged_regions.setdefault(r.code, r)
-                continue
-            cache[source.name] = {"fetched_at": now, "regions": regions}
-            for r in regions:
+            for r in entry.get("regions", []):
                 merged_regions.setdefault(r.code, r)
 
-        self._write_cache(cache)
-        relays = [n for n, _ in merged.values() if n.role in RELAY_ROLES]
-        self._nodes = sorted(relays, key=lambda n: n.public_key)
-        self._keys = [n.public_key for n in self._nodes]
-        self._by_key = {n.public_key: n for n in self._nodes}
-        self._regions = sorted(merged_regions.values(), key=lambda r: r.code)
-        self._scope_keys = {scope_key(r.code): "#" + r.code for r in self._regions}
+        relays = [n for n in merged.values() if n.role in RELAY_ROLES]
+        nodes = sorted(relays, key=lambda n: n.public_key)
+        keys = [n.public_key for n in nodes]
+        by_key = {n.public_key: n for n in nodes}
+        regions = sorted(merged_regions.values(), key=lambda r: r.code)
+        scope_keys = {scope_key(r.code): "#" + r.code for r in regions}
+
+        # Atomic swap: readers see old or new snapshot, never a mix.
+        self._nodes = nodes
+        self._keys = keys
+        self._by_key = by_key
+        self._regions = regions
+        self._scope_keys = scope_keys
         log.info(
             "registry loaded: %d relay nodes from %d sources, %d regions",
-            len(self._nodes),
+            len(nodes),
             len(self._sources),
-            len(self._regions),
+            len(regions),
         )
 
     async def _http_get(self, source: Source) -> Any:
@@ -253,9 +338,9 @@ class NodeRegistry:
             ) as client:
                 resp = await client.get(source.url)
                 resp.raise_for_status()
-                return resp.json()
-        except (httpx.HTTPError, ValueError) as ex:
-            log.warning("%s: fetch failed: %s", source.name, ex)
+                return orjson.loads(resp.content)
+        except (httpx.HTTPError, orjson.JSONDecodeError):
+            log.warning("%s: fetch failed", source.name, exc_info=True)
             return None
 
     async def _fetch(self, source: Source) -> list[Node] | None:
@@ -298,10 +383,12 @@ class NodeRegistry:
         log.info("%s: fetched %d regions", source.name, len(regions))
         return regions
 
-    def _read_cache(self) -> dict[str, dict[str, Any]]:
+    def _read_cache(self) -> dict[str, Any]:
         try:
-            data = json.loads(self._cache_path.read_text())
-            out = {}
+            data = orjson.loads(self._cache_path.read_bytes())
+            if not isinstance(data, dict):
+                return {}
+            out: dict[str, Any] = {}
             for name, entry in data.items():
                 item: dict[str, Any] = {"fetched_at": int(entry["fetched_at"])}
                 if "nodes" in entry:
@@ -310,12 +397,12 @@ class NodeRegistry:
                     item["regions"] = [Region(**r) for r in entry["regions"]]
                 out[name] = item
             return out
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, orjson.JSONDecodeError, KeyError, TypeError):
             return {}
 
-    def _write_cache(self, cache: dict[str, dict[str, Any]]) -> None:
+    def _write_cache(self, cache: dict[str, Any]) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
+        data: dict[str, Any] = {}
         for name, entry in cache.items():
             item: dict[str, Any] = {"fetched_at": entry["fetched_at"]}
             if "nodes" in entry:
@@ -324,7 +411,7 @@ class NodeRegistry:
                 item["regions"] = [asdict(r) for r in entry["regions"]]
             data[name] = item
         tmp = self._cache_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
+        tmp.write_bytes(orjson.dumps(data))
         tmp.replace(self._cache_path)
 
     def lookup_prefix(self, prefix: str) -> list[Node]:

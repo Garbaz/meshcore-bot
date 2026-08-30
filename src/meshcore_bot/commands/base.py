@@ -227,8 +227,8 @@ class Command:
         assert self.subcommands is not None
         if not tokens:
             if self.default_sub is not None:
-                sub = self.subcommands[self.default_sub]
-                await sub.func(ctx)
+                default = self.subcommands[self.default_sub]
+                await default.func(ctx)
                 return None
             return f"usage: {self.usage()}"
         sub_name = tokens[0].lower()

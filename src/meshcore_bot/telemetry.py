@@ -1,17 +1,18 @@
 """Telemetry logging: periodically request and log telemetry from contacts.
 
 Active users are tracked in a JSON state file so logging survives bot
-restarts. Telemetry readings are appended as JSON lines to
-``<state_dir>/<pubkey>.jsonl``.
+restarts. Each recording session writes to its own file
+``<state_dir>/<pubkey>-<iso_timestamp>.jsonl`` so multiple sessions stay
+separate.
 """
 
 import asyncio
-import json
 import logging
 import time
 from pathlib import Path
 from typing import Any
 
+import orjson
 from meshcore import MeshCore
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,6 @@ class TelemetryLogger:
         self._active[pubkey] = {
             "period": period,
             "started_at": int(time.time()),
-            "readings": 0,
             "next_poll": 0,  # poll immediately on next loop iteration
         }
         self._save_state()
@@ -76,6 +76,15 @@ class TelemetryLogger:
 
     def get_status(self, pubkey: str) -> dict[str, Any] | None:
         return self._active.get(pubkey)
+
+    def session_path(self, pubkey: str) -> Path | None:
+        """Path of the current session file, or None if not recording."""
+        entry = self._active.get(pubkey)
+        if entry is None:
+            return None
+        started_at = int(entry["started_at"])
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started_at))
+        return self._state_dir / f"{pubkey}-{stamp}.jsonl"
 
     def stop(self) -> None:
         """Cancel the poll loop (called on shutdown)."""
@@ -122,12 +131,13 @@ class TelemetryLogger:
                 log.info("telemetry %s: no response (timeout)", pubkey[:12])
                 return
 
-            entry["readings"] += 1
             record = {"time": int(time.time()), "data": lpp}
-            data_path = self._state_dir / f"{pubkey}.jsonl"
-            with data_path.open("a") as f:
-                f.write(json.dumps(record) + "\n")
-            log.info("telemetry %s: %s", pubkey[:12], json.dumps(lpp))
+            data_path = self.session_path(pubkey)
+            assert data_path is not None  # pubkey is active
+            with data_path.open("ab") as f:
+                f.write(orjson.dumps(record))
+                f.write(b"\n")
+            log.info("telemetry %s: %s", pubkey[:12], orjson.dumps(lpp).decode())
 
         except asyncio.CancelledError:
             raise
@@ -137,12 +147,12 @@ class TelemetryLogger:
     def _load_state(self) -> None:
         """Read active users from the state file."""
         try:
-            data = json.loads(self._state_path.read_text())
+            data = orjson.loads(self._state_path.read_bytes())
             if isinstance(data, dict):
                 self._active = data
-        except (OSError, ValueError):
+        except (OSError, orjson.JSONDecodeError):
             pass
 
     def _save_state(self) -> None:
         """Persist active users to the state file."""
-        self._state_path.write_text(json.dumps(self._active))
+        self._state_path.write_bytes(orjson.dumps(self._active))
