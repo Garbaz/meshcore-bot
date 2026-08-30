@@ -297,10 +297,10 @@ async def _resolve_location(
     return found
 
 
-@command(["weather", "w"], usage="[place]")
-async def _(ctx: Context, args: list[str]) -> None:
+@command(["weather", "w"])
+async def weather_cmd(ctx: Context, place: list[str] | None = None) -> None:
     """Show current weather."""
-    result = await _resolve_location(ctx, args)
+    result = await _resolve_location(ctx, place or [])
     if result is None:
         await ctx.reply("No location available. Try: weather <place>")
         return

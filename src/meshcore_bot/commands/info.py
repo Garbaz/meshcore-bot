@@ -29,7 +29,7 @@ def _compress_route(lines: list[str], max_bytes: int) -> str:
 
 
 @command(["ping", "p", "beep", "test"], scope=Scope.OPEN)
-async def _(ctx: Context, args: list[str]) -> None:
+async def ping_cmd(ctx: Context) -> None:
     """Test connectivity."""
     hops = _hops_str(ctx.msg.get("path_len"))
     verb = ctx.verb.lower()
@@ -41,7 +41,7 @@ async def _(ctx: Context, args: list[str]) -> None:
 
 
 @command(["path", "t", "route", "trace"])
-async def _(ctx: Context, args: list[str]) -> None:
+async def path_cmd(ctx: Context) -> None:
     """Show the hop-by-hop path of the current message."""
     msg = ctx.msg
     path_len: Any = msg.get("path_len")

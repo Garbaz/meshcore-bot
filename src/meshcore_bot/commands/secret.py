@@ -6,7 +6,7 @@ from meshcore_bot.commands.base import Context, command
 
 
 @command(["frog", "f"], secret=True)
-async def _(ctx: Context, args: list[str]) -> None:
+async def frog_cmd(ctx: Context) -> None:
     """Send a frog emoji."""
     await ctx.reply("\U0001f438")
 
@@ -27,6 +27,6 @@ async def _(ctx: Context, args: list[str]) -> None:
     secret=True,
     allowed_everywhere=True,
 )
-async def _(ctx: Context, args: list[str]) -> None:
+async def hi_cmd(ctx: Context) -> None:
     """Greetings."""
     await ctx.reply(f"\U0001f44b {ctx.verb}")

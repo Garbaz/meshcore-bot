@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,6 @@ from meshcore_bot.commands import (
     command_help,
     full_help,
     get_command,
-    usage_line,
 )
 from meshcore_bot.parser import (
     ParsedMessage,
@@ -36,6 +37,40 @@ from meshcore_bot.scope import ScopeResolver
 from meshcore_bot.telemetry import TelemetryLogger
 
 log = logging.getLogger("meshcore_bot")
+
+
+# ---------------------------------------------------------------------------
+# Message deduplication (RF flood delivers the same packet via multiple paths)
+# ---------------------------------------------------------------------------
+
+
+class MessageDedup:
+    """TTL-based dedup for incoming messages.
+
+    Flood packets arrive multiple times via different paths. The companion
+    deduplicates by txt_hash, but the sender may also retransmit if it
+    misses the ACK from our companion. This catches both cases.
+    """
+
+    _DEDUP_TTL = 30.0  # seconds
+
+    def __init__(self) -> None:
+        self._seen: OrderedDict[str, float] = OrderedDict()
+
+    def check(self, key: str) -> bool:
+        """Return True if this is a new message, False if duplicate."""
+        now = time.monotonic()
+        # Evict expired entries.
+        while self._seen:
+            _k, t = next(iter(self._seen.items()))
+            if now - t > self._DEDUP_TTL:
+                self._seen.popitem(last=False)
+            else:
+                break
+        if key in self._seen:
+            return False
+        self._seen[key] = now
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -282,14 +317,22 @@ async def handle_dm(
     bot_name: str,
     location: str | None,
     telemetry: TelemetryLogger,
+    dedup: MessageDedup,
     event: Event,
 ) -> None:
     msg: dict[str, Any] = event.payload or {}
     prefix: str = msg.get("pubkey_prefix", "")
     text = str(msg.get("text", "")).strip()
-    log.info("DM from %s: %r", prefix, text)
     if not text:
         return
+
+    # Dedup: same DM can arrive multiple times (retransmits, multiple paths).
+    ts: Any = msg.get("sender_timestamp", 0)
+    dedup_key = f"dm:{prefix}:{ts}:{text}"
+    if not dedup.check(dedup_key):
+        return
+
+    log.info("DM from %s: %r", prefix, text)
 
     # Refresh contacts so the sender's path is visible.
     await mc.ensure_contacts()
@@ -357,14 +400,23 @@ async def handle_channel(
     chan_names: dict[int, str],
     chan_allowed: dict[int, set[str] | None],
     rate_chan: MessageBudget,
+    dedup: MessageDedup,
     event: Event,
 ) -> None:
     msg: dict[str, Any] = event.payload or {}
     chan: Any = msg.get("channel_idx")
     text = str(msg.get("text", "")).strip()
-    log.info("channel %s msg: %r", chan, text)
     if not text:
         return
+
+    # Dedup: same flood packet arrives via multiple paths.
+    ts: Any = msg.get("sender_timestamp", 0)
+    txt_hash: Any = msg.get("txt_hash", 0)
+    dedup_key = f"ch:{chan}:{ts}:{txt_hash or text}"
+    if not dedup.check(dedup_key):
+        return
+
+    log.info("channel %s msg: %r", chan, text)
     if chan not in chan_indices:
         return
 
@@ -427,13 +479,15 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
     if not verb:
         return
 
-    # "?verb" is a help query; bare "?" shows the full help listing
+    # "?verb" is a help query; bare "?" shows the full help listing.
+    # "?record start" queries a subcommand.
     if verb.startswith("?"):
         name = verb[1:]
         if not name:
             await ctx.reply(full_help(ctx.is_dm, ctx.channel_allowed))
             return
-        h = command_help(name)
+        sub = parsed.args[0] if parsed.args else None
+        h = command_help(name, sub)
         if h is not None:
             await ctx.reply(h)
         else:
@@ -464,10 +518,6 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
         log.info("%s not allowed on %s, ignoring", verb, ctx.channel_name)
         return
 
-    if len(parsed.args) < cmd.min_args:
-        await ctx.reply(f"usage: {usage_line(cmd)}")
-        return
-
     # Budget check: only for channel messages, only when we're about to
     # actually reply.  This avoids wasting budget on commands that are
     # silently dropped by scope or channel restrictions.
@@ -475,6 +525,7 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
         log.info("channel %s budget exhausted, skipping reply", ctx.channel_name)
         return
 
+    ctx.verb = verb
     log.info(
         "dispatching %s (args=%s, mention=%s, dm=%s, chan=%s)",
         verb,
@@ -483,9 +534,10 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
         ctx.is_dm,
         ctx.channel_name or "-",
     )
-    ctx.verb = verb
     try:
-        await cmd.func(ctx, parsed.args)
+        err = await cmd.call(ctx, parsed.args)
+        if err is not None:
+            await ctx.reply(err)
     except Exception:
         log.exception("command %s failed", verb)
 
@@ -552,6 +604,8 @@ async def main(args: argparse.Namespace) -> None:
         refill_per_sec=args.channel_rate / 3600.0,
     )
 
+    dedup = MessageDedup()
+
     async def on_direct(event: Event) -> None:
         await handle_dm(
             mc,
@@ -559,6 +613,7 @@ async def main(args: argparse.Namespace) -> None:
             bot_name,
             args.location,
             telemetry,
+            dedup,
             event,
         )
 
@@ -574,6 +629,7 @@ async def main(args: argparse.Namespace) -> None:
             chan_names,
             chan_allowed,
             rate_chan,
+            dedup,
             event,
         )
 
@@ -582,29 +638,11 @@ async def main(args: argparse.Namespace) -> None:
 
     await mc.start_auto_message_fetching()
 
-    async def poll_messages() -> None:
-        """Poll for messages as push events may not arrive over USB serial."""
-        while True:
-            await asyncio.sleep(5)
-            try:
-                while True:
-                    result = await mc.commands.get_msg()
-                    if result.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
-                        break
-                    await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                raise
-            except OSError as e:
-                log.debug("poll error: %s", e)
-
-    poll_task = asyncio.create_task(poll_messages())
-
     log.info("listening for messages...")
     try:
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
-        poll_task.cancel()
         telemetry.stop()
     finally:
         await mc.disconnect()
