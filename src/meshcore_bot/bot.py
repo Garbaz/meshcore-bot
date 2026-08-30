@@ -5,13 +5,10 @@ channels at startup, and dispatches commands from incoming DMs or channel
 messages that @-mention the bot. Use ``--help`` for CLI options.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging
-import time
-from collections import OrderedDict
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -19,227 +16,25 @@ from meshcore import EventType, MeshCore
 from meshcore.events import Event
 
 from meshcore_bot.budget import MessageBudget
+from meshcore_bot.channel_spec import ChannelSpec, parse_channel_specs
+from meshcore_bot.cli import build_parser, connect
 from meshcore_bot.commands import (
     Context,
-    Scope,
     command_help,
     full_help,
     get_command,
 )
+from meshcore_bot.dedup import MessageDedup
 from meshcore_bot.parser import (
     ParsedMessage,
     parse_channel_message,
-    parse_channel_specs,
     parse_dm_message,
 )
-from meshcore_bot.registry import NodeRegistry, scope_key
+from meshcore_bot.registry import NodeRegistry
 from meshcore_bot.scope import ScopeResolver
 from meshcore_bot.telemetry import TelemetryLogger
 
 log = logging.getLogger("meshcore_bot")
-
-
-# ---------------------------------------------------------------------------
-# Message deduplication (RF flood delivers the same packet via multiple paths)
-# ---------------------------------------------------------------------------
-
-
-class MessageDedup:
-    """TTL-based dedup for incoming messages.
-
-    Flood packets arrive multiple times via different paths. The companion
-    deduplicates by txt_hash, but the sender may also retransmit if it
-    misses the ACK from our companion. This catches both cases.
-    """
-
-    _DEDUP_TTL = 30.0  # seconds
-
-    def __init__(self) -> None:
-        self._seen: OrderedDict[str, float] = OrderedDict()
-
-    def check(self, key: str) -> bool:
-        """Return True if this is a new message, False if duplicate."""
-        now = time.monotonic()
-        # Evict expired entries.
-        while self._seen:
-            _k, t = next(iter(self._seen.items()))
-            if now - t > self._DEDUP_TTL:
-                self._seen.popitem(last=False)
-            else:
-                break
-        if key in self._seen:
-            return False
-        self._seen[key] = now
-        return True
-
-
-# ---------------------------------------------------------------------------
-# Connection (mirrors meshcore-cli flags)
-# ---------------------------------------------------------------------------
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="meshcore-bot",
-        description="Reply to MeshCore DMs and channel mentions with path stats.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        add_help=False,
-    )
-    g = p.add_argument_group("connection")
-    g.add_argument("-t", "--tcp", metavar="HOST", help="connect via TCP/IP to HOST")
-    g.add_argument("-p", "--port", type=int, default=5000, help="TCP port")
-    g.add_argument("-s", "--serial", metavar="PORT", help="connect via serial/USB port")
-    g.add_argument(
-        "-b",
-        "--baudrate",
-        type=int,
-        default=115200,
-        help="serial baudrate",
-    )
-    g.add_argument("-a", "--address", metavar="ADDR", help="BLE device address or name")
-    g.add_argument(
-        "-d", "--device", metavar="NAME", help="filter BLE devices by name/address"
-    )
-    g.add_argument(
-        "-P", "--pair", action="store_true", help="force BLE pairing via the OS"
-    )
-    g.add_argument(
-        "-T",
-        "--scan-timeout",
-        type=float,
-        default=2.0,
-        help="BLE scan timeout in seconds",
-    )
-
-    g2 = p.add_argument_group("logging")
-    g2.add_argument("-D", "--debug", action="store_true", help="enable debug logging")
-    g2.add_argument("-q", "--quiet", action="store_true", help="only show errors")
-    g2.add_argument("-h", "--help", action="help", help="show this help and exit")
-
-    g3 = p.add_argument_group("bot")
-    g3.add_argument(
-        "--location",
-        default=None,
-        help="bot location shown in ping/path/weather fallback",
-    )
-    g3.add_argument(
-        "--channels",
-        action="append",
-        default=[],
-        metavar="SPEC",
-        help=(
-            "channel spec: name[allowed_cmds] or just name. "
-            "e.g. 'ping[ping,path],bot,weather[weather]'"
-        ),
-    )
-    g3.add_argument(
-        "--cache-path",
-        default=str(Path("~/.cache/meshcore-bot/registry.json").expanduser()),
-        help="registry cache path",
-    )
-    g3.add_argument(
-        "--registry-ttl",
-        type=float,
-        default=24.0,
-        metavar="HOURS",
-        help="registry refresh interval in hours",
-    )
-    g3.add_argument(
-        "--default-scope",
-        default=None,
-        metavar="CODE",
-        help=(
-            "region code (without #) to use when the incoming scope can't be "
-            "resolved (e.g. 'de-bw'). If unset, replies are sent unscoped."
-        ),
-    )
-    g3.add_argument(
-        "--channel-rate",
-        type=int,
-        default=10,
-        metavar="N",
-        help=(
-            "max replies per channel per hour (default: 10). "
-            "Budget refills continuously up to the burst cap."
-        ),
-    )
-    g3.add_argument(
-        "--channel-burst",
-        type=int,
-        default=5,
-        metavar="N",
-        help=(
-            "max burst of replies per channel before the budget refills (default: 5)."
-        ),
-    )
-    return p
-
-
-async def connect(args: argparse.Namespace) -> MeshCore | None:
-    """Create a MeshCore connection based on CLI args (TCP > serial > BLE)."""
-    if args.tcp:
-        mc = await MeshCore.create_tcp(
-            host=args.tcp, port=args.port, debug=args.debug, only_error=args.quiet
-        )
-        if mc is None:
-            log.error("could not connect to %s:%d", args.tcp, args.port)
-        return mc
-
-    if args.serial:
-        mc = await MeshCore.create_serial(
-            port=args.serial,
-            baudrate=args.baudrate,
-            debug=args.debug,
-            only_error=args.quiet,
-        )
-        if mc is None:
-            log.error("could not connect to serial port %s", args.serial)
-        return mc
-
-    # BLE
-    try:
-        from bleak import BleakScanner
-    except ImportError:
-        log.error("BLE requires the 'bleak' package; install it or use -t/-s")
-        return None
-
-    address: str = str(args.device or args.address or "")
-    device: Any = None
-    if not address or ":" not in address:
-        log.info(
-            "scanning BLE for MeshCore device%s",
-            f" matching {address}" if address else "",
-        )
-        devices = await BleakScanner.discover(timeout=args.scan_timeout)
-        for d in devices:
-            if (
-                d.name
-                and d.name.startswith("MeshCore-")
-                and (not address or address in d.name)
-            ):
-                address = d.address
-                device = d
-                log.info("found %s (%s)", d.name, d.address)
-                break
-        else:
-            log.error("no matching BLE device found")
-            return None
-
-    mc = await MeshCore.create_ble(
-        address=address,
-        device=device,
-        debug=args.debug,
-        only_error=args.quiet,
-        pin=True if args.pair else None,  # pyright: ignore[reportArgumentType]
-    )
-    if mc is None:
-        log.error("could not connect to BLE device %s", address)
-    return mc
-
-
-# ---------------------------------------------------------------------------
-# Channel helpers
-# ---------------------------------------------------------------------------
 
 
 async def fetch_channels(mc: MeshCore) -> list[dict[str, Any]]:
@@ -256,59 +51,45 @@ async def fetch_channels(mc: MeshCore) -> list[dict[str, Any]]:
 
 
 async def ensure_channels(
-    mc: MeshCore, wanted: list[tuple[str, set[str] | None]]
-) -> tuple[set[int], dict[int, str], dict[int, set[str] | None]]:
+    mc: MeshCore, wanted: list[ChannelSpec]
+) -> dict[int, ChannelSpec]:
     """Ensure all *wanted* channel names exist on the companion.
 
-    Returns (indices, name_map, allowed_map) where name_map is idx → lowercase
-    channel name and allowed_map is idx → allowed command names (or None).
+    Returns a mapping of channel index to ChannelSpec for all
+    wanted channels that were found or created.
     """
     existing = await fetch_channels(mc)
-    found: set[int] = set()
     used_indices: set[int] = set()
     existing_by_name: dict[str, int] = {}
-    name_map: dict[int, str] = {}
-    allowed_map: dict[int, set[str] | None] = {}
-
-    wanted_names = {name.lower() for name, _ in wanted}
+    configs: dict[int, ChannelSpec] = {}
 
     for ch in existing:
         idx = ch["channel_idx"]
-        used_indices.add(idx)
         name = str(ch.get("channel_name", "")).lower()
         if name:
+            used_indices.add(idx)
             existing_by_name[name] = idx
-            name_map[idx] = name
-        if name in wanted_names:
-            found.add(idx)
+        # Empty-named slots are available for reuse.
 
-    # Channel 0 is "public" (no name); start searching from 1 for new channels.
-    next_idx = 1
-    for name, allowed in wanted:
-        lname = name.lower()
+    next_idx = 1  # Channel 0 is "public" (no name); start from 1.
+    for spec in wanted:
+        lname = spec.name.lower()
         if lname in existing_by_name:
             idx = existing_by_name[lname]
-            allowed_map[idx] = allowed
+            configs[idx] = spec
             continue
         while next_idx in used_indices:
             next_idx += 1
-        log.info("creating channel %s at index %d", name, next_idx)
-        res = await mc.commands.set_channel(next_idx, name)
+        log.info("creating channel %s at index %d", lname, next_idx)
+        res = await mc.commands.set_channel(next_idx, lname)
         if res.is_error():
-            log.error("failed to create channel %s: %s", name, res.payload)
+            log.error("failed to create channel %s: %s", lname, res.payload)
             continue
-        found.add(next_idx)
+        configs[next_idx] = spec
         used_indices.add(next_idx)
-        name_map[next_idx] = lname
-        allowed_map[next_idx] = allowed
         next_idx += 1
 
-    return found, name_map, allowed_map
-
-
-# ---------------------------------------------------------------------------
-# Event handling
-# ---------------------------------------------------------------------------
+    return configs
 
 
 async def handle_dm(
@@ -318,6 +99,7 @@ async def handle_dm(
     location: str | None,
     telemetry: TelemetryLogger,
     dedup: MessageDedup,
+    startup_time: int,
     event: Event,
 ) -> None:
     msg: dict[str, Any] = event.payload or {}
@@ -330,6 +112,11 @@ async def handle_dm(
     ts: Any = msg.get("sender_timestamp", 0)
     dedup_key = f"dm:{prefix}:{ts}:{text}"
     if not dedup.check(dedup_key):
+        return
+
+    # Ignore messages from before the bot started (companion clock).
+    if isinstance(ts, int) and ts < startup_time:
+        log.debug("ignoring pre-startup DM from %s (ts=%d)", prefix, ts)
         return
 
     log.info("DM from %s: %r", prefix, text)
@@ -372,8 +159,6 @@ async def _find_chan_log_entry(
     ``sender_timestamp`` + ``text`` to look up the entry in
     ``channels_log``, which carries ``transport_code`` and ``pkt_payload``.
     """
-    from hashlib import sha256
-
     parser = mc._reader.packet_parser  # type: ignore[attr-defined]
     txt_hash: int | None = msg.get("txt_hash")
     if txt_hash is None:
@@ -396,11 +181,10 @@ async def handle_channel(
     scope_resolver: ScopeResolver,
     location: str | None,
     telemetry: TelemetryLogger,
-    chan_indices: set[int],
-    chan_names: dict[int, str],
-    chan_allowed: dict[int, set[str] | None],
+    chan_configs: dict[int, ChannelSpec],
     rate_chan: MessageBudget,
     dedup: MessageDedup,
+    startup_time: int,
     event: Event,
 ) -> None:
     msg: dict[str, Any] = event.payload or {}
@@ -416,16 +200,22 @@ async def handle_channel(
     if not dedup.check(dedup_key):
         return
 
-    log.info("channel %s msg: %r", chan, text)
-    if chan not in chan_indices:
+    # Ignore messages from before the bot started (companion clock).
+    if isinstance(ts, int) and ts < startup_time:
+        log.debug("ignoring pre-startup channel msg on %s (ts=%d)", chan, ts)
         return
+
+    spec = chan_configs.get(chan)
+    if spec is None:
+        log.debug("channel %s (not listened) msg: %r", chan, text)
+        return
+
+    log.info("channel %s msg: %r", spec.name, text)
 
     parsed = parse_channel_message(text, bot_name)
     if parsed is None:
-        log.info("unparseable channel message on %s: %r", chan, text)
+        log.info("unparseable channel message on %s: %r", spec.name, text)
         return
-
-    chan_key = f"chan:{chan}"
 
     # Resolve the flood scope from the RF log entry so the reply uses the
     # same scope as the incoming message.  Mirrors chooseReplyScope()
@@ -444,7 +234,7 @@ async def handle_channel(
             flood_scope = None
             log.debug("scope unresolved, sending unscoped")
     elif resolved[1] == b"":
-        flood_scope = None  # unscoped → force unscoped
+        flood_scope = None  # unscoped: force unscoped
     else:
         flood_scope = resolved[1]
         flood_scope_name = resolved[0]
@@ -461,12 +251,14 @@ async def handle_channel(
         flood_scope=flood_scope,
         flood_scope_name=flood_scope_name,
         channel_idx=chan,
-        channel_name=chan_names.get(chan, ""),
-        channel_allowed=chan_allowed.get(chan),
+        channel_name=spec.name,
+        channel_allowed=spec.allowed,
+        channel_open=spec.open,
+        open_cmds=spec.open_cmds,
         msg=msg,
         location=location,
         telemetry=telemetry,
-        budget_check=lambda: rate_chan.check(chan_key),
+        budget_check=lambda: rate_chan.check(f"chan:{chan}"),
     )
     await dispatch(ctx, parsed)
 
@@ -475,7 +267,7 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
     """Run the matching command, respecting scope and channel restrictions."""
     verb = parsed.verb
 
-    # Empty verb means mention-only (no command) — ignore.
+    # Empty verb means mention-only (no command): ignore.
     if not verb:
         return
 
@@ -500,11 +292,17 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
             await ctx.reply(f'unknown command "{verb}". try help.')
         return
 
-    # Scope check
-    if cmd.scope is Scope.DM_ONLY and not ctx.is_dm:
-        log.info("%s is DM_ONLY, ignoring in channel %s", verb, ctx.channel_name)
+    # dm_only commands are silently ignored in channels.
+    if cmd.dm_only and not ctx.is_dm:
+        log.info("%s is dm_only, ignoring in channel %s", verb, ctx.channel_name)
         return
-    if cmd.scope is Scope.MENTION and not ctx.is_dm and not parsed.mentioned:
+    # Mention required in channels unless relaxed by ~ config.
+    if (
+        not ctx.is_dm
+        and not parsed.mentioned
+        and not ctx.channel_open
+        and cmd.name not in ctx.open_cmds
+    ):
         return
 
     # Channel restriction: some channels only allow specific commands.
@@ -542,11 +340,6 @@ async def dispatch(ctx: Context, parsed: ParsedMessage) -> None:
         log.exception("command %s failed", verb)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 async def main(args: argparse.Namespace) -> None:
     logging.basicConfig(
         level=logging.DEBUG
@@ -572,29 +365,31 @@ async def main(args: argparse.Namespace) -> None:
     log.info("connected to %s", mc.self_info.get("name", "?"))
     bot_name = str(mc.self_info.get("name", ""))
 
-    # Read the companion's default flood scope and build a scope resolver.
+    # Read the companion's default flood scope and use it as both the
+    # primary match (checked first on resolve) and the fallback (used
+    # when the incoming scope can't be determined). The bot never calls
+    # set_default_flood_scope, so the companion's setting is respected.
     scope_resolver = ScopeResolver(registry)
     scope_res = await mc.commands.get_default_flood_scope()
     if not scope_res.is_error():
         scope_name = scope_res.payload.get("scope_name", "") or ""
         scope_key_hex = scope_res.payload.get("scope_key", "")
         if scope_key_hex:
-            scope_resolver.set_default(scope_name, bytes.fromhex(scope_key_hex))
+            scope_key_bytes = bytes.fromhex(scope_key_hex)
+            scope_resolver.set_default(scope_name, scope_key_bytes)
+            scope_resolver.set_fallback(scope_name, scope_key_bytes)
     log.info("default flood scope: %s", scope_resolver.default_name or "(none)")
-
-    # Set the fallback scope for when the incoming scope can't be resolved.
-    if args.default_scope:
-        fb_key = scope_key(args.default_scope)
-        scope_resolver.set_fallback("#" + args.default_scope, fb_key)
-        log.info("fallback flood scope: %s", scope_resolver.fallback_name)
 
     await mc.ensure_contacts()
     log.info("fetched %d contacts", len(mc.contacts))
 
     mc.set_decrypt_channel_logs(True)
     channel_specs = parse_channel_specs(args.channels)
-    chan_indices, chan_names, chan_allowed = await ensure_channels(mc, channel_specs)
-    log.info("listening on channels: %s", chan_names or "(none)")
+    chan_configs = await ensure_channels(mc, channel_specs)
+    log.info(
+        "listening on channels: %s",
+        ", ".join(s.name for s in chan_configs.values()) or "(none)",
+    )
 
     telemetry = TelemetryLogger(mc, Path(args.cache_path).parent / "telemetry")
     telemetry.start()
@@ -606,6 +401,21 @@ async def main(args: argparse.Namespace) -> None:
 
     dedup = MessageDedup()
 
+    # Drain any backlog of messages from the companion before subscribing
+    # our handlers, so we don't reply to messages sent before the bot started.
+    log.info("draining message backlog...")
+    while True:
+        res = await mc.commands.get_msg()
+        if res.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+            break
+    log.info("backlog drained")
+
+    # Record the companion's current time as the startup cutoff. Messages
+    # with sender_timestamp before this are ignored (second line of defense
+    # against backlog, in case draining missed any).
+    startup_time = mc.time
+    log.info("companion time: %d", startup_time)
+
     async def on_direct(event: Event) -> None:
         await handle_dm(
             mc,
@@ -614,6 +424,7 @@ async def main(args: argparse.Namespace) -> None:
             args.location,
             telemetry,
             dedup,
+            startup_time,
             event,
         )
 
@@ -625,11 +436,10 @@ async def main(args: argparse.Namespace) -> None:
             scope_resolver,
             args.location,
             telemetry,
-            chan_indices,
-            chan_names,
-            chan_allowed,
+            chan_configs,
             rate_chan,
             dedup,
+            startup_time,
             event,
         )
 

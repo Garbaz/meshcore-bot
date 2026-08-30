@@ -1,13 +1,12 @@
 """weather command (alias: w)."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 
 import httpx
 
-from meshcore_bot.commands.base import Context, command
+from meshcore_bot.commands.base import command
+from meshcore_bot.commands.context import Context
 from meshcore_bot.registry import resolve_path
 
 log = logging.getLogger(__name__)
@@ -136,7 +135,7 @@ async def _geocode(
     """Resolve a place name to (lat, lon, display_name) via Open-Meteo geocoding.
 
     If *ref* (lat, lon) is given, return the nearest match instead of the
-    first result — so ``Sölden`` near Freiburg picks BW, not Austria.
+    first result, so ambiguous place names resolve to the closest one.
     """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -239,8 +238,8 @@ async def _fetch_weather(
 async def _find_coords(ctx: Context) -> tuple[float, float, str] | None:
     """Find the sender's area coordinates and a display name.
 
-    Priority: nearest repeater on path → sender's telemetry GPS →
-    bot's companion GPS → geocode ctx.location.
+    Priority: nearest repeater on path, sender's telemetry GPS,
+    bot's companion GPS, geocode ctx.location.
     """
     # 1. Nearest located repeater on message path (live, from current message)
     coords = _path_location(ctx)

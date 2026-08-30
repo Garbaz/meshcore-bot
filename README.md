@@ -7,7 +7,7 @@ A MeshCore companion bot that responds to commands sent via DMs and channel ment
 ```sh
 uv run meshcore-bot -s /dev/ttyUSB0 \
   --location "Mariana Trench" \
-  --channels "ping[ping], test[ping,path], weather[weather], bot"
+  --channels "ping~[ping], test[~ping, path], weather~[weather], bot, mybot~"
 ```
 
 See for all options:

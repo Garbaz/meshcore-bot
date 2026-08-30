@@ -1,10 +1,9 @@
 """ping and path commands (connectivity and routing info)."""
 
-from __future__ import annotations
-
 from typing import Any
 
-from meshcore_bot.commands.base import Context, Scope, _hops_str, command
+from meshcore_bot.commands.base import command
+from meshcore_bot.commands.context import Context, _hops_str
 from meshcore_bot.registry import resolve_path
 
 
@@ -28,7 +27,7 @@ def _compress_route(lines: list[str], max_bytes: int) -> str:
     return text
 
 
-@command(["ping", "p", "beep", "test"], scope=Scope.OPEN)
+@command(["ping", "p", "beep", "test"])
 async def ping_cmd(ctx: Context) -> None:
     """Test connectivity."""
     hops = _hops_str(ctx.msg.get("path_len"))
@@ -55,12 +54,8 @@ async def path_cmd(ctx: Context) -> None:
 
     path_hex = str(msg.get("path") or "")
 
-    if not isinstance(path_len, int) or path_len < 0 or path_len >= 255:
-        r = f", region {region}" if region else ""
-        await ctx.reply(fmt(f"{_hops_str(path_len)}{r}"))
-        return
-
-    if not path_hex:
+    # Flood (255) or unresolvable path_len, or no path data: just show hop count.
+    if not isinstance(path_len, int) or path_len < 0 or path_len >= 255 or not path_hex:
         r = f", region {region}" if region else ""
         await ctx.reply(fmt(f"{_hops_str(path_len)}{r}"))
         return

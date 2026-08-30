@@ -1,8 +1,7 @@
 """fun commands: frog (secret) and hi (multilingual greeting)."""
 
-from __future__ import annotations
-
-from meshcore_bot.commands.base import Context, command
+from meshcore_bot.commands.base import command
+from meshcore_bot.commands.context import Context
 
 
 @command(["frog", "f"], secret=True)

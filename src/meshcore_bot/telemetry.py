@@ -1,20 +1,18 @@
 """Telemetry logging: periodically request and log telemetry from contacts.
 
 Active users are tracked in a JSON state file so logging survives bot
-restarts. Telemetry data is written to the program log (not to a data file).
+restarts. Telemetry readings are appended as JSON lines to
+``<state_dir>/<pubkey>.jsonl``.
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from meshcore import MeshCore
+from meshcore import MeshCore
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +26,7 @@ _STATE_FILE = "active.json"
 class TelemetryLogger:
     """Manages periodic telemetry polling for subscribed contacts.
 
-    Each active user is identified by their public key prefix (12 hex chars).
+    Each active user is identified by their full public key (64-char hex).
     The poll loop runs as a background task, requesting telemetry from each
     active user's companion at their configured period.
     """
@@ -55,6 +53,7 @@ class TelemetryLogger:
             "period": period,
             "started_at": int(time.time()),
             "readings": 0,
+            "next_poll": 0,  # poll immediately on next loop iteration
         }
         self._save_state()
         self._ensure_task()
@@ -92,12 +91,6 @@ class TelemetryLogger:
         """Periodically request telemetry from all active users."""
         while self._active:
             now = time.time()
-            next_wake = min(now + entry["period"] for entry in self._active.values())
-            sleep_for = max(1, next_wake - now)
-
-            await asyncio.sleep(sleep_for)
-
-            now = time.time()
             due = [
                 (pk, entry)
                 for pk, entry in list(self._active.items())
@@ -105,6 +98,11 @@ class TelemetryLogger:
             ]
             for pubkey, entry in due:
                 await self._poll_one(pubkey, entry)
+
+            now = time.time()
+            next_wake = min(now + entry["period"] for entry in self._active.values())
+            sleep_for = max(1, next_wake - now)
+            await asyncio.sleep(sleep_for)
 
     async def _poll_one(self, pubkey: str, entry: dict[str, Any]) -> None:
         """Request telemetry from one contact and log the result."""
@@ -125,12 +123,16 @@ class TelemetryLogger:
                 return
 
             entry["readings"] += 1
+            record = {"ts": int(time.time()), "data": lpp}
+            data_path = self._state_dir / f"{pubkey}.jsonl"
+            with data_path.open("a") as f:
+                f.write(json.dumps(record) + "\n")
             log.info("telemetry %s: %s", pubkey[:12], json.dumps(lpp))
 
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.debug("telemetry %s: request failed", pubkey[:12], exc_info=True)
+            log.warning("telemetry %s: request failed", pubkey[:12], exc_info=True)
 
     def _load_state(self) -> None:
         """Read active users from the state file."""

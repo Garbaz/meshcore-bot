@@ -1,10 +1,9 @@
 """help and add commands."""
 
-from __future__ import annotations
-
 from urllib.parse import quote
 
-from meshcore_bot.commands.base import Context, command, command_help, full_help
+from meshcore_bot.commands.base import command, command_help, full_help
+from meshcore_bot.commands.context import Context
 
 
 @command(["help", "h", "?"], allowed_everywhere=True)

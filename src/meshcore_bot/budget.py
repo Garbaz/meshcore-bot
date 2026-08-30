@@ -3,15 +3,13 @@
 Mirrors the firmware's ``Dispatcher::updateTxBudget()`` model: each
 key (typically a channel) has a budget that refills at a fixed rate
 up to a cap, and is debited by one per outgoing message.  When the
-budget is exhausted the caller silently drops the reply — this is
+budget is exhausted the caller silently drops the reply. This is
 how the bot avoids dominating a channel when users spam commands.
 
 The class is intentionally generic (keyed by ``str``) so that future
 per-user or per-(channel, sender) throttling can reuse it unchanged
 by passing a different key.
 """
-
-from __future__ import annotations
 
 import time
 

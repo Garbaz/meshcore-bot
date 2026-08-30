@@ -10,8 +10,6 @@ Region scope keys for ``#hashtag`` regions are deterministic:
 provides all known region codes, loaded and cached via :class:`NodeRegistry`.
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import logging
@@ -46,9 +44,9 @@ class ScopeResolver:
 
     Mirrors the firmware's ``chooseReplyScope`` (RoutingPolicy.h):
 
-    - ``REPLY_SCOPE_REQUEST``   — incoming scope resolved → reuse it
-    - ``REPLY_SCOPE_NONE``      — incoming was unscoped → send unscoped
-    - ``REPLY_SCOPE_DEFAULT``   — scope unknowable → use the fallback
+    - ``REPLY_SCOPE_REQUEST``   incoming scope resolved, reuse it
+    - ``REPLY_SCOPE_NONE``      incoming was unscoped, send unscoped
+    - ``REPLY_SCOPE_DEFAULT``   scope unknowable, use the fallback
     """
 
     def __init__(self, registry: NodeRegistry) -> None:

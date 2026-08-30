@@ -1,19 +1,7 @@
 """record command: start/stop telemetry recording for the sender."""
 
-from __future__ import annotations
-
-from enum import Enum
-
-from meshcore_bot.commands.base import Context, Scope, command
-
-
-class RecordAction(Enum):
-    """Subcommands for the record command."""
-
-    START = "start"
-    STOP = "stop"
-    STATUS = "status"
-
+from meshcore_bot.commands.base import command
+from meshcore_bot.commands.context import Context
 
 _DEFAULT_PERIOD = 5  # minutes
 _MIN_PERIOD = 1  # minute
@@ -25,24 +13,23 @@ def _format_status(period: int, readings: int) -> str:
     return f"{mins}min interval, {readings} readings"
 
 
-@command(["record", "log", "r"], scope=Scope.DM_ONLY, secret=True)
+def _pubkey(ctx: Context) -> str:
+    """Extract the sender's full public key."""
+    assert ctx.contact is not None  # DM_ONLY: contact always set
+    return str(ctx.contact["public_key"])
+
+
+@command(["record", "log", "r"], dm_only=True, secret=True)
 class _:
-    """Start, stop, or check telemetry recording."""
+    """start, stop, or check telemetry recording"""
 
     default = "status"
 
     @staticmethod
     async def start(ctx: Context, period: int | None = None) -> None:
         """Start recording (N=min interval, default 5)."""
-        if ctx.contact is None or ctx.telemetry is None:
-            await ctx.reply("record only works in DMs")
-            return
-
-        pubkey = str(ctx.contact.get("public_key", ""))
-        if not pubkey:
-            await ctx.reply("Could not determine your public key")
-            return
-
+        assert ctx.telemetry is not None  # always set in main()
+        pubkey = _pubkey(ctx)
         mins = max(period or _DEFAULT_PERIOD, _MIN_PERIOD)
 
         info = ctx.telemetry.get_status(pubkey)
@@ -58,14 +45,8 @@ class _:
     @staticmethod
     async def stop(ctx: Context) -> None:
         """Stop recording."""
-        if ctx.contact is None or ctx.telemetry is None:
-            await ctx.reply("record only works in DMs")
-            return
-
-        pubkey = str(ctx.contact.get("public_key", ""))
-        if not pubkey:
-            await ctx.reply("Could not determine your public key")
-            return
+        assert ctx.telemetry is not None
+        pubkey = _pubkey(ctx)
 
         info = ctx.telemetry.stop_logging(pubkey)
         if info is None:
@@ -79,14 +60,8 @@ class _:
     @staticmethod
     async def status(ctx: Context) -> None:
         """Show recording status."""
-        if ctx.contact is None or ctx.telemetry is None:
-            await ctx.reply("record only works in DMs")
-            return
-
-        pubkey = str(ctx.contact.get("public_key", ""))
-        if not pubkey:
-            await ctx.reply("Could not determine your public key")
-            return
+        assert ctx.telemetry is not None
+        pubkey = _pubkey(ctx)
 
         info = ctx.telemetry.get_status(pubkey)
         if info is None:

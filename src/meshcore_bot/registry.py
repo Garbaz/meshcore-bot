@@ -6,8 +6,6 @@ first source that knows a node wins. The cache is refreshed when older than
 REGISTRY_TTL (stale data is kept if a refresh fails).
 """
 
-from __future__ import annotations
-
 import bisect
 import hashlib
 import json
@@ -59,7 +57,7 @@ def scope_key(code: str) -> bytes:
     return hashlib.sha256(name.encode("utf-8")).digest()[:16]
 
 
-@dataclass
+@dataclass(slots=True)
 class Node:
     public_key: str  # 64-char lowercase hex
     name: str
@@ -69,7 +67,7 @@ class Node:
     last_seen: int | None  # unix epoch, best effort
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Region:
     code: str  # e.g. "at-bgld" (hashtag without #)
     name: str  # human-readable, e.g. "bgld"
@@ -245,7 +243,8 @@ class NodeRegistry:
             len(self._regions),
         )
 
-    async def _fetch(self, source: Source) -> list[Node] | None:
+    async def _http_get(self, source: Source) -> Any:
+        """Fetch JSON from *source*, logging a warning on failure."""
         try:
             async with httpx.AsyncClient(
                 headers={"User-Agent": USER_AGENT},
@@ -254,9 +253,14 @@ class NodeRegistry:
             ) as client:
                 resp = await client.get(source.url)
                 resp.raise_for_status()
-                payload = resp.json()
+                return resp.json()
         except (httpx.HTTPError, ValueError) as ex:
             log.warning("%s: fetch failed: %s", source.name, ex)
+            return None
+
+    async def _fetch(self, source: Source) -> list[Node] | None:
+        payload = await self._http_get(source)
+        if payload is None:
             return None
         if source.dialect == "corescope":
             payload = payload.get("nodes", []) if isinstance(payload, dict) else payload
@@ -279,17 +283,8 @@ class NodeRegistry:
         return nodes
 
     async def _fetch_regions(self, source: Source) -> list[Region] | None:
-        try:
-            async with httpx.AsyncClient(
-                headers={"User-Agent": USER_AGENT},
-                timeout=FETCH_TIMEOUT,
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(source.url)
-                resp.raise_for_status()
-                payload = resp.json()
-        except (httpx.HTTPError, ValueError) as ex:
-            log.warning("%s: fetch failed: %s", source.name, ex)
+        payload = await self._http_get(source)
+        if payload is None:
             return None
         flat = payload.get("flat", []) if isinstance(payload, dict) else []
         regions: list[Region] = []
@@ -342,7 +337,7 @@ class NodeRegistry:
         return [self._by_key[self._keys[i]] for i in range(lo, hi)]
 
 
-@dataclass
+@dataclass(slots=True)
 class ResolvedHop:
     hex: str
     node: Node | None
